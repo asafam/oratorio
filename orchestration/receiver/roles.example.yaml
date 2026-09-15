@@ -1,0 +1,36 @@
+# Copy to roles.local.yaml (gitignored) and fill in real secrets --
+# NEVER commit the filled-in version. Values come from the output of:
+#   python -m orchestration.roles.sync_roles
+#
+# One entry per role this receiver process fronts. A typical split: your
+# main compute host's receiver fronts experiment-manager/dataset/evaluator/
+# monitor; a second host (e.g. your laptop) runs its own receiver fronting
+# only overseer.
+
+monitor:
+  webhook_secret: "<ORCH_WEBHOOK_SECRET printed by sync_roles.py for 'monitor'>"
+  agent_token: "<ORCH_AGENT_TOKEN printed by sync_roles.py for 'monitor'>"
+  runner: claude          # claude | codex
+  brief_path: orchestration/roles/monitor.md
+  max_runtime_minutes: 30
+
+evaluator:
+  webhook_secret: "<...>"
+  agent_token: "<...>"
+  runner: claude
+  brief_path: orchestration/roles/evaluator.md
+  max_runtime_minutes: 60
+
+dataset:
+  webhook_secret: "<...>"
+  agent_token: "<...>"
+  runner: codex
+  brief_path: orchestration/roles/dataset.md
+  max_runtime_minutes: 30
+
+experiment-manager:
+  webhook_secret: "<...>"
+  agent_token: "<...>"
+  runner: claude
+  brief_path: orchestration/roles/experiment-manager.md
+  max_runtime_minutes: 120  # kicks off long-running jobs

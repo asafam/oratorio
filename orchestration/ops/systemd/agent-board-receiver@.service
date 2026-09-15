@@ -1,0 +1,23 @@
+[Unit]
+Description=Orchestration board receiver for %i
+# Templated so multiple hosts can reuse it: your main compute host runs one
+# instance fronting its local roles (the %i instance name is just a label
+# here since receiver/server.py itself fronts every role listed in
+# roles.local.yaml, not one unit per role); a second host runs its own
+# instance fronting whichever role(s) live there.
+# `systemctl --user enable --now agent-board-receiver@main.service` (or
+# whatever label you choose per host).
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-board
+Environment=ORCH_MCP_URL=https://CHANGEME.example/mcp
+Environment=ORCH_RECEIVER_CONFIG=%h/agent-board/orchestration/receiver/roles.local.yaml
+Environment=ORCH_RECEIVER_PORT=8400
+ExecStart=%h/agent-board/.venv/bin/python -m orchestration.receiver.server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

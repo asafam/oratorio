@@ -1,0 +1,17 @@
+[Unit]
+Description=Orchestration board dispatcher (LISTEN/NOTIFY -> webhook wake-ups)
+# Deploy on the board-host, colocated with Postgres. NOT on a role's own
+# compute host.
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-board
+Environment=ORCH_BOARD_DSN=postgresql://orchestration:CHANGEME@localhost:5433/orchestration_board
+Environment=ORCH_MCP_URL=https://CHANGEME.example/mcp
+ExecStart=%h/agent-board/.venv/bin/python -m orchestration.dispatcher.listen
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

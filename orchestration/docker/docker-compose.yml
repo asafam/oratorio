@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: orchestration-board-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: orchestration_board
+      POSTGRES_USER: ${ORCH_BOARD_PG_USER:-orchestration}
+      POSTGRES_PASSWORD: ${ORCH_BOARD_PG_PASSWORD:?set ORCH_BOARD_PG_PASSWORD in the environment or .env}
+    ports:
+      - "${ORCH_BOARD_PG_PORT:-5433}:5432"
+    volumes:
+      - ${ORCH_BOARD_PGDATA:-${HOME}/.orchestration-board/pgdata}:/var/lib/postgresql/data
+    networks:
+      - agent-board-net
+
+networks:
+  agent-board-net:
+    name: agent-board-net
