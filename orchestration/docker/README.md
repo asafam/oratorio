@@ -34,7 +34,7 @@ space. Prefer this convention any time the board (or its dev/test
 stand-in) might run on a host shared with other users' containers.
 
 Container and network names (`orchestration-board-postgres`,
-`agent-board-net`) are deliberately specific, not generic — on a
+`oratorio-net`) are deliberately specific, not generic — on a
 Docker host shared with other users/services, generic names risk colliding
 with someone else's container.
 

@@ -44,7 +44,7 @@ echo "Expect: 202 with {\"accepted\": true, \"queued\": false}. If queued:true, 
 echo "was already in flight -- wait for it to finish and retry."
 
 echo "== 3. Confirm a real claude/codex process actually ran =="
-echo "Check the receiver's own logs (journalctl --user -u agent-board-receiver@<label> -f,"
+echo "Check the receiver's own logs (journalctl --user -u oratorio-receiver@<label> -f,"
 echo "or wherever it's running) for a real invocation, and confirm it's using current CLI"
 echo "flags (this is the part the automated suite can't verify -- see"
 echo "orchestration/receiver/runners/claude_runner.py's VERIFY AT DEPLOY TIME comment)."

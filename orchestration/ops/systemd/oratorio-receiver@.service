@@ -5,17 +5,17 @@ Description=Orchestration board receiver for %i
 # here since receiver/server.py itself fronts every role listed in
 # roles.local.yaml, not one unit per role); a second host runs its own
 # instance fronting whichever role(s) live there.
-# `systemctl --user enable --now agent-board-receiver@main.service` (or
+# `systemctl --user enable --now oratorio-receiver@main.service` (or
 # whatever label you choose per host).
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/agent-board
+WorkingDirectory=%h/oratorio
 Environment=ORCH_MCP_URL=https://CHANGEME.example/mcp
-Environment=ORCH_RECEIVER_CONFIG=%h/agent-board/orchestration/receiver/roles.local.yaml
+Environment=ORCH_RECEIVER_CONFIG=%h/oratorio/orchestration/receiver/roles.local.yaml
 Environment=ORCH_RECEIVER_PORT=8400
-ExecStart=%h/agent-board/.venv/bin/python -m orchestration.receiver.server
+ExecStart=%h/oratorio/.venv/bin/python -m orchestration.receiver.server
 Restart=on-failure
 RestartSec=5
 

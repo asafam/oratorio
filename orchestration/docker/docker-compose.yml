@@ -12,8 +12,8 @@ services:
     volumes:
       - ${ORCH_BOARD_PGDATA:-${HOME}/.orchestration-board/pgdata}:/var/lib/postgresql/data
     networks:
-      - agent-board-net
+      - oratorio-net
 
 networks:
-  agent-board-net:
-    name: agent-board-net
+  oratorio-net:
+    name: oratorio-net

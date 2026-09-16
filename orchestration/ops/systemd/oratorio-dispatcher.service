@@ -6,10 +6,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/agent-board
+WorkingDirectory=%h/oratorio
 Environment=ORCH_BOARD_DSN=postgresql://orchestration:CHANGEME@localhost:5433/orchestration_board
 Environment=ORCH_MCP_URL=https://CHANGEME.example/mcp
-ExecStart=%h/agent-board/.venv/bin/python -m orchestration.dispatcher.listen
+ExecStart=%h/oratorio/.venv/bin/python -m orchestration.dispatcher.listen
 Restart=on-failure
 RestartSec=5
 

@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "orchestration-board": {
-      "command": "/absolute/path/to/agent-board/.venv/bin/python",
+      "command": "/absolute/path/to/oratorio/.venv/bin/python",
       "args": ["-m", "orchestration.mcp.server"],
-      "cwd": "/absolute/path/to/agent-board",
+      "cwd": "/absolute/path/to/oratorio",
       "env": {
         "ORCH_BOARD_DSN": "postgresql://orchestration:<password>@<board-host>:5433/orchestration_board",
         "ORCH_AGENT_TOKEN": "<this role's token, from `python -m orchestration.roles.sync_roles`>"

@@ -1,4 +1,4 @@
-# Agent Board
+# Oratorio
 
 A shared, durable message board that lets several role-based AI coding
 agents (Claude Code, Codex CLI, or anything else that can speak MCP and be

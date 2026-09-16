@@ -3,7 +3,7 @@ Description=Cloudflare Tunnel for the orchestration board (this host's endpoint)
 # One of these runs on EACH host that needs inbound reachability it doesn't
 # control: the board-host (tunnels the MCP endpoint) and every local-role
 # host (each tunnels its own receiver). Each host gets its own named
-# tunnel -- create with `cloudflared tunnel create agent-board-<host>` and
+# tunnel -- create with `cloudflared tunnel create oratorio-<host>` and
 # a config.yml mapping its hostname to the local port (8300 for the
 # board-host's MCP server, 8400 for a receiver) before enabling this unit.
 # See https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
@@ -11,7 +11,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/cloudflared tunnel run agent-board-CHANGEME
+ExecStart=/usr/local/bin/cloudflared tunnel run oratorio-CHANGEME
 Restart=on-failure
 RestartSec=5
 
