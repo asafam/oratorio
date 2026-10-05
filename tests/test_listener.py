@@ -28,7 +28,7 @@ def dsn():
     with psycopg.connect(d, autocommit=True) as conn:
         for agent_id in ("toy-lis-sender", "toy-lis-recipient"):
             registry.upsert_agent(
-                conn, agent_id=agent_id, role_doc_path="x", role_version="x", brief="x",
+                conn, name=agent_id, role_doc_path="x", role_version="x", brief="x",
                 peers=[], topics=[], auth_token_hash=auth.hash_token(auth.generate_token()),
             )
     yield d

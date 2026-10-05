@@ -45,6 +45,7 @@ export ORCH_BOARD_DSN="postgresql://orchestration:${ORCH_BOARD_PG_PASSWORD}@loca
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/001_init.sql
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/002_seed_topics.sql
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/003_persistent_agents.sql
+psql "$ORCH_BOARD_DSN" -f orchestration/schema/004_workspaces.sql
 ```
 
 ## Teardown

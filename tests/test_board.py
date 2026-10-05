@@ -30,7 +30,7 @@ def _make_agent(conn, agent_id: str, topics: list[str] | None = None, is_auditor
     token = auth.generate_token()
     registry.upsert_agent(
         conn,
-        agent_id=agent_id,
+        name=agent_id,
         role_doc_path=f"orchestration/roles/{agent_id}.md",
         role_version="test",
         brief=f"toy agent {agent_id}",

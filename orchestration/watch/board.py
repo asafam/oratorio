@@ -11,8 +11,11 @@ watching does not create delivery rows or mark anything as seen.
 It checks the database once a second. That is plain code against Postgres
 -- no model is involved, so it costs no tokens.
 
+With --workspace it shows that one team, by agent name. Without, it shows
+every workspace on the board, and agents appear as `workspace/name`.
+
 Usage:
-    python -m orchestration.watch.board [--history N] [--once]
+    python -m orchestration.watch.board [--workspace NAME] [--history N] [--once]
 """
 from __future__ import annotations
 
@@ -52,9 +55,15 @@ def _one_line(content: str) -> str:
 
 def format_agent(agent: dict[str, Any]) -> str:
     if agent["online"]:
-        return _c("32", f"● {agent['agent_id']}") + f"  online ({agent['runner'] or '?'})"
+        return _c("32", f"● {agent['label']}") + f"  online ({agent['runner'] or '?'})"
     last = f"last seen {_clock(agent['last_seen_at'])}" if agent["last_seen_at"] else "never seen"
-    return _c("2", f"○ {agent['agent_id']}  offline, {last}")
+    return _c("2", f"○ {agent['label']}  offline, {last}")
+
+
+def _label(alias: str, workspace: str | None) -> str:
+    """SQL for how an agent is shown: its name inside one workspace, its
+    full key when several workspaces share the screen."""
+    return f"{alias}.name" if workspace is not None else f"{alias}.agent_id"
 
 
 def format_message(m: dict[str, Any]) -> str:
@@ -94,46 +103,64 @@ def format_event(e: dict[str, Any]) -> str:
     return _c("33", line) if e["kind"] == "reply_timeout" else _c("2", line)
 
 
-def fetch_messages(conn: psycopg.Connection, *, after_id: int, limit: int | None = None) -> list[dict]:
+def fetch_agents(conn: psycopg.Connection, workspace: str | None) -> list[dict]:
+    agents = registry.list_agents(conn, workspace=workspace)
+    for agent in agents:
+        agent["label"] = agent["name"] if workspace is not None else agent["agent_id"]
+    return agents
+
+
+def fetch_messages(conn: psycopg.Connection, *, after_id: int, workspace: str | None = None,
+                   limit: int | None = None) -> list[dict]:
     """Messages with id > after_id, oldest first. With `limit`, only the
     newest `limit` of them (still returned oldest first)."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT * FROM (
-                SELECT m.id, m.sender_agent_id AS sender, m.recipient_agent_id AS recipient,
+                SELECT m.id, {_label("s", workspace)} AS sender, {_label("r", workspace)} AS recipient,
                        m.topic, m.is_broadcast, m.content, m.in_reply_to, m.thread_id,
                        m.reply_by, m.expires_at, m.created_at,
-                       ARRAY(SELECT d.agent_id FROM board.message_delivery d
-                             WHERE d.message_id = m.id ORDER BY d.agent_id) AS recipients
+                       ARRAY(SELECT {_label("a", workspace)} FROM board.message_delivery d
+                             JOIN board.agent a ON a.agent_id = d.agent_id
+                             WHERE d.message_id = m.id ORDER BY 1) AS recipients
                 FROM board.message m
-                WHERE m.id > %s
+                JOIN board.agent s ON s.agent_id = m.sender_agent_id
+                LEFT JOIN board.agent r ON r.agent_id = m.recipient_agent_id
+                WHERE m.id > %(after)s AND (%(ws)s::text IS NULL OR m.workspace = %(ws)s)
                 ORDER BY m.id DESC
-                LIMIT %s
+                LIMIT %(limit)s
             ) newest ORDER BY id
             """,
-            (after_id, limit),
+            {"after": after_id, "ws": workspace, "limit": limit},
         )
         return cur.fetchall()
 
 
-def fetch_events(conn: psycopg.Connection, *, since: datetime, until: datetime) -> list[dict]:
+def fetch_events(conn: psycopg.Connection, *, since: datetime, until: datetime,
+                 workspace: str | None = None) -> list[dict]:
     """Hand-overs, acks and reply timeouts stamped in (since, until]."""
+    label = _label("a", workspace)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
-            SELECT 'delivered' AS kind, delivered_at AS at, message_id, agent_id
-              FROM board.message_delivery WHERE delivered_at > %(since)s AND delivered_at <= %(until)s
+            f"""
+            SELECT 'delivered' AS kind, d.delivered_at AS at, d.message_id, {label} AS agent_id
+              FROM board.message_delivery d JOIN board.agent a ON a.agent_id = d.agent_id
+             WHERE d.delivered_at > %(since)s AND d.delivered_at <= %(until)s
+               AND (%(ws)s::text IS NULL OR a.workspace = %(ws)s)
             UNION ALL
-            SELECT 'acked', acked_at, message_id, agent_id
-              FROM board.message_delivery WHERE acked_at > %(since)s AND acked_at <= %(until)s
+            SELECT 'acked', d.acked_at, d.message_id, {label}
+              FROM board.message_delivery d JOIN board.agent a ON a.agent_id = d.agent_id
+             WHERE d.acked_at > %(since)s AND d.acked_at <= %(until)s
+               AND (%(ws)s::text IS NULL OR a.workspace = %(ws)s)
             UNION ALL
-            SELECT 'reply_timeout', reply_timeout_noted_at, id, sender_agent_id
-              FROM board.message
-             WHERE reply_timeout_noted_at > %(since)s AND reply_timeout_noted_at <= %(until)s
+            SELECT 'reply_timeout', m.reply_timeout_noted_at, m.id, {label}
+              FROM board.message m JOIN board.agent a ON a.agent_id = m.sender_agent_id
+             WHERE m.reply_timeout_noted_at > %(since)s AND m.reply_timeout_noted_at <= %(until)s
+               AND (%(ws)s::text IS NULL OR m.workspace = %(ws)s)
             ORDER BY at, message_id
             """,
-            {"since": since, "until": until},
+            {"since": since, "until": until, "ws": workspace},
         )
         return cur.fetchall()
 
@@ -142,11 +169,11 @@ def _db_now(conn: psycopg.Connection) -> datetime:
     return conn.execute("SELECT now()").fetchone()[0]
 
 
-def watch(conn: psycopg.Connection, *, history: int, once: bool) -> None:
+def watch(conn: psycopg.Connection, *, history: int, once: bool, workspace: str | None = None) -> None:
     presence: dict[str, bool] = {}
 
     def show_presence_changes() -> None:
-        for agent in registry.list_agents(conn):
+        for agent in fetch_agents(conn, workspace):
             if presence.get(agent["agent_id"]) != agent["online"]:
                 presence[agent["agent_id"]] = agent["online"]
                 print(format_agent(agent))
@@ -158,7 +185,7 @@ def watch(conn: psycopg.Connection, *, history: int, once: bool) -> None:
     # between this machine's clock and the board's can't skip or repeat one.
     seen_until = _db_now(conn)
     last_id = 0
-    for m in fetch_messages(conn, after_id=0, limit=history):
+    for m in fetch_messages(conn, after_id=0, workspace=workspace, limit=history):
         print(format_message(m))
         last_id = m["id"]
     if once:
@@ -170,17 +197,18 @@ def watch(conn: psycopg.Connection, *, history: int, once: bool) -> None:
         sys.stdout.flush()
         time.sleep(POLL_SECONDS)
         show_presence_changes()
-        for m in fetch_messages(conn, after_id=last_id):
+        for m in fetch_messages(conn, after_id=last_id, workspace=workspace):
             print(format_message(m))
             last_id = m["id"]
         now = _db_now(conn)
-        for e in fetch_events(conn, since=seen_until, until=now):
+        for e in fetch_events(conn, since=seen_until, until=now, workspace=workspace):
             print(format_event(e))
         seen_until = now
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live feed of the agents' message board.")
+    parser.add_argument("-w", "--workspace", help="show only this workspace (default: all)")
     parser.add_argument("--history", type=int, default=20, help="recent messages to show first (default 20)")
     parser.add_argument("--once", action="store_true", help="print the current state and exit")
     args = parser.parse_args()
@@ -191,7 +219,7 @@ def main() -> None:
         sys.exit(1)
     try:
         with psycopg.connect(dsn, autocommit=True) as conn:
-            watch(conn, history=args.history, once=args.once)
+            watch(conn, history=args.history, once=args.once, workspace=args.workspace)
     except KeyboardInterrupt:
         pass
 

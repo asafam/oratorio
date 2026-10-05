@@ -15,14 +15,21 @@ when it did not work.
 
 ## Responsibilities
 
-- When `manager` assigns an experiment, first tell `todo` you have
-  started it.
-- Run it. For anything heavy (long scripts, reading many files, large
-  outputs), hand the work to a subagent and keep only its summary, so
-  your own context stays small.
+- When `manager` assigns an experiment, run it. For anything heavy (long
+  scripts, reading many files, large outputs), hand the work to a
+  subagent and keep only its summary, so your own context stays small.
+- Keep each experiment in its own folder, `runs/{agent_id}/<thread_id>/`,
+  and write a `NOTES.md` there as you go: the research question it
+  serves, the exact commands, the settings and seeds, the code version
+  (git commit), the numbers, where each output file is, and what went
+  wrong along the way. Someone who was not here must be able to repeat
+  the run from this file alone.
 - When finished, post the outcome to the `results` topic: what you ran,
-  the numbers, where the outputs are on disk, and anything surprising.
-  Keep the message short; put details in files and give the paths.
+  the numbers, the path to `NOTES.md`, and anything surprising. Keep the
+  message short; the details belong in the notes.
+- `reviewer` will try to break your result, and `writer` may need more
+  detail. Answer their questions, and fix or rerun when `manager` sends
+  the work back.
 - If you are blocked or the instructions are unclear, ask `manager`
   rather than guessing. Set a reply deadline if you cannot continue
   without the answer.
@@ -35,3 +42,4 @@ when it did not work.
   same time. Write your outputs under your own folder
   (`runs/{agent_id}/`) and do not edit files another agent is using.
 - Report results honestly. A failed or inconclusive run is a result.
+  Report every run you made, not only the best one.

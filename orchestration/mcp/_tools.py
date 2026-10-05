@@ -28,7 +28,8 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Post a message to the board. Exactly one of recipient/topic/
-        broadcast must be set. `sender` is never a parameter -- it is
+        broadcast must be set; recipient is another agent's name (see
+        list_agents). `sender` is never a parameter -- it is
         resolved server-side from your authenticated identity. To reply to
         a message, pass its `id` as in_reply_to with msg_type='REPLY' --
         never rely on "a reply just arrived from X", always thread by this
@@ -118,17 +119,32 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
         added and removed), so check here rather than assuming. An offline
         agent still receives messages -- they wait in its inbox until it
         is back. Use get_role(agent_id) for what a role does."""
+        sender = get_sender()
         with db.get_pool().connection() as conn:
-            return {"agents": registry.list_agents(conn, active_only=active_only)}
+            agents = registry.list_agents(
+                conn, workspace=registry.workspace_of(conn, sender), active_only=active_only
+            )
+        # Agents know each other by name; the internal key stays internal.
+        return {"agents": [
+            {"agent_id": a["name"], "role": a["role"], "online": a["online"],
+             "runner": a["runner"], "topics": a["topics"], "last_seen_at": a["last_seen_at"]}
+            for a in agents
+        ]}
 
     @mcp.tool()
     def get_role(agent_id: str | None = None) -> dict[str, Any] | None:
         """Look up a role's brief/peers/topics. Defaults to your own role;
         pass another agent_id to read a peer's brief (informational only,
         not an access grant)."""
-        target = agent_id or get_sender()
+        sender = get_sender()
         with db.get_pool().connection() as conn:
-            return registry.get_role(conn, target)
+            target = sender
+            if agent_id:
+                target = registry.find_agent(conn, registry.workspace_of(conn, sender), agent_id)
+                if target is None:
+                    return None
+            role = registry.get_role(conn, target)
+        return {"agent_id": role["name"], "brief": role["brief"], "topics": role["topics"]}
 
     @mcp.tool()
     def list_topics() -> dict[str, Any]:
@@ -137,8 +153,8 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
 
     @mcp.tool()
     def read_all_messages(since_id: int = 0, limit: int = 200) -> dict[str, Any]:
-        """Auditor-only full board history (bypasses your own inbox
-        entirely). Refused unless your role is flagged is_auditor."""
+        """Auditor-only full history of your workspace (bypasses your own
+        inbox entirely). Refused unless your role is flagged is_auditor."""
         sender = get_sender()
         with db.get_pool().connection() as conn:
             return {"messages": registry.read_all_messages(conn, sender, since_id=since_id, limit=limit)}

@@ -31,7 +31,7 @@ def _make_agent(dsn: str, agent_id: str, topics: list[str] | None = None) -> str
     with psycopg.connect(dsn, autocommit=True) as conn:
         registry.upsert_agent(
             conn,
-            agent_id=agent_id,
+            name=agent_id,
             role_doc_path=f"orchestration/roles/{agent_id}.md",
             role_version="test",
             brief=f"toy mcp agent {agent_id}",

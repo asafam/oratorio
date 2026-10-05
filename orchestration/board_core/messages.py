@@ -6,6 +6,12 @@ it). Only an ack consumes a message -- reading never does -- so a session
 that crashes or is cleared mid-task loses nothing. "Still pending" is
 defined once, by the board.pending_delivery view (not acked, not expired).
 
+Names vs ids: every `agent_id` argument here is the board's internal key
+(what a token resolves to). What agents type and read -- `recipient`,
+`sender` -- are short names, looked up only inside the caller's own
+workspace. A message can never leave its sender's workspace; the
+database enforces that too (schema/004_workspaces.sql).
+
 Every function here takes an already-open psycopg Connection so callers
 (the MCP tool handlers, tests, toy Phase-0 scripts) control transaction
 boundaries explicitly. Nothing in this module is transport-aware (no MCP,
@@ -56,6 +62,7 @@ def post_message(
 
     Exactly one of recipient/topic/broadcast must be set -- validated here
     (defense in depth) and by the DB's exactly_one_route CHECK constraint.
+    `recipient` is an agent's name in the sender's workspace.
     `sender_agent_id` must already be resolved from an authenticated token
     (see auth.resolve_sender) -- this function does not verify identity.
     """
@@ -71,10 +78,26 @@ def post_message(
     if reply_within_seconds is not None:
         expects_reply = True
 
+    workspace = conn.execute(
+        "SELECT workspace FROM board.agent WHERE agent_id = %s", (sender_agent_id,)
+    ).fetchone()[0]
+
+    recipient_agent_id = None
+    if recipient:
+        # Only ever within the sender's workspace -- no global fallback.
+        row = conn.execute(
+            "SELECT agent_id FROM board.agent WHERE workspace = %s AND name = %s",
+            (workspace, recipient),
+        ).fetchone()
+        if row is None:
+            raise RoutingError(f"no agent named {recipient!r} in this workspace")
+        recipient_agent_id = row[0]
+
     depth_remaining = DEFAULT_DEPTH
     if in_reply_to is not None:
         parent = conn.execute(
-            "SELECT depth_remaining, thread_id FROM board.message WHERE id = %s", (in_reply_to,)
+            "SELECT depth_remaining, thread_id FROM board.message WHERE id = %s AND workspace = %s",
+            (in_reply_to, workspace),
         ).fetchone()
         if parent is None:
             raise RoutingError(f"in_reply_to={in_reply_to} does not exist")
@@ -94,7 +117,7 @@ def post_message(
         """,
         (
             sender_agent_id,
-            recipient,
+            recipient_agent_id,
             topic,
             broadcast,
             msg_type,
@@ -113,7 +136,8 @@ def post_message(
     delivered_to = [
         r[0]
         for r in conn.execute(
-            "SELECT agent_id FROM board.message_delivery WHERE message_id = %s",
+            "SELECT a.name FROM board.message_delivery d "
+            "JOIN board.agent a ON a.agent_id = d.agent_id WHERE d.message_id = %s ORDER BY a.name",
             (message_id,),
         ).fetchall()
     ]
@@ -121,9 +145,15 @@ def post_message(
 
 
 _MESSAGE_COLUMNS = """
-    m.id, m.sender_agent_id AS sender, m.recipient_agent_id AS recipient,
+    m.id, s.name AS sender, r.name AS recipient,
     m.topic, m.is_broadcast, m.msg_type, m.content, m.in_reply_to,
     m.expects_reply, m.expires_at, m.reply_by, m.thread_id, m.metadata, m.created_at
+"""
+# Joined onto a delivery row aliased `d`.
+_MESSAGE_JOINS = """
+    JOIN board.message m ON m.id = d.message_id
+    JOIN board.agent s ON s.agent_id = m.sender_agent_id
+    LEFT JOIN board.agent r ON r.agent_id = m.recipient_agent_id
 """
 
 
@@ -153,7 +183,7 @@ def read_messages(
             f"""
             SELECT {_MESSAGE_COLUMNS}
             FROM {source} d
-            JOIN board.message m ON m.id = d.message_id
+            {_MESSAGE_JOINS}
             WHERE {where}
             ORDER BY m.id
             LIMIT %s
@@ -191,7 +221,7 @@ def undelivered(conn: Connection, agent_id: str, *, limit: int = 50) -> list[dic
             f"""
             SELECT {_MESSAGE_COLUMNS}
             FROM board.pending_delivery d
-            JOIN board.message m ON m.id = d.message_id
+            {_MESSAGE_JOINS}
             WHERE d.agent_id = %s AND d.delivered_at IS NULL
             ORDER BY m.id
             LIMIT %s
@@ -239,7 +269,9 @@ def claim_overdue_requests(conn: Connection, agent_id: str) -> list[dict[str, An
                     SELECT 1 FROM board.message r
                     WHERE r.in_reply_to = m.id AND r.msg_type = 'REPLY'
                   )
-            RETURNING m.id, m.recipient_agent_id AS recipient, m.topic, m.is_broadcast,
+            RETURNING m.id,
+                      (SELECT name FROM board.agent WHERE agent_id = m.recipient_agent_id) AS recipient,
+                      m.topic, m.is_broadcast,
                       m.content, m.reply_by, m.thread_id
             """,
             (agent_id,),

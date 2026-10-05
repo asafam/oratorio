@@ -19,40 +19,69 @@ repo is specific to that team.
 orchestration/ops/scripts/board_tunnel.sh up     # only if the board is remote
 cd ~/my-research
 oratorio up                                      # bin/oratorio in this repo
-tmux attach -t oratorio
+oratorio attach
 ```
 
 You get one tile per agent plus a `BOARD` tile, laid out in a grid for
 you. Click a tile to type in it. Give your goal to `manager`; it hands
 work to the others through the board.
 
-Change the team while it runs:
-
 | Command | What it does |
 |---|---|
+| `oratorio up` | Starts a workspace. |
+| `oratorio attach` | Opens its tiles. |
 | `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... |
 | `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
-| `oratorio status` | What is running, and what you can add. |
-| `oratorio save` | Writes the running team to `oratorio.yaml` in the working folder. |
-| `oratorio down` | Stops everything. |
+| `oratorio save` | Writes the running team to the workspace's yaml file. |
+| `oratorio status` | Every running workspace, and what can be added to each. |
+| `oratorio down` | Stops a workspace (`--all` for every one). |
 
 ### Workspaces
 
-A workspace is a research folder with an `oratorio.yaml` in it. Running
-`oratorio up` there starts exactly that team:
+A workspace is a **name plus a team**. Several can run at the same time.
+On the board they are fully separate: `manager` in one workspace and
+`manager` in another are different agents, and neither can see or reach
+the other's messages. Each workspace gets its own set of tiles.
+
+A workspace is described by a small yaml file:
 
 ```yaml
+name: thesis
+workdir: .                     # where its agents work; default: this file's folder
 agents: [manager, todo, experiment-1, experiment-2]
 model: sonnet                  # optional: one model for every agent
 permission_mode: acceptEdits
 ```
 
-Write it by hand, or build the team with `add`/`remove` and run
-`oratorio save`. Without the file, `up` starts one agent per role.
-Only one workspace runs at a time -- all agents share one board.
+Call the file `oratorio.yaml`, or `<anything>.oratorio.yaml` to keep
+several workspaces in one folder. Write it by hand, or build a team with
+`add`/`remove` and run `oratorio save`.
 
-Options for `up`: `--workdir DIR` (instead of `cd`), `--only manager,todo`,
-`--model haiku`, `--permission-mode MODE`.
+`-w NAME` on any command says which workspace you mean:
+
+```bash
+oratorio up -w thesis
+oratorio up -w ablations
+oratorio add experiment -w ablations
+oratorio status
+```
+
+Leaving `-w` out is a shortcut, not a rule:
+- `up` uses the folder's only workspace file; with no file at all, it
+  names the workspace after the folder and starts one agent per role.
+- The other commands use the workspace of the folder you are in if it is
+  running, or the only one that is running.
+
+A folder is not tied to one workspace, and a workspace is not tied to
+the folder its file sits in (`workdir`). Two teams working in the same
+folder at once can overwrite each other's files (both `todo` agents
+write `TODO.md`, for example) -- nothing stops you, so point them at
+different folders unless you mean it. Two running workspaces cannot
+share a name.
+
+More options for `up`: `--only manager,todo`, `--model haiku`,
+`--permission-mode MODE`, `--workdir DIR` (look there for workspace
+files instead of the current folder).
 
 - `permission_mode` is how much the agents may do without asking you
   (Claude Code's own modes). The default, `acceptEdits`, lets them edit
@@ -61,8 +90,8 @@ Options for `up`: `--workdir DIR` (instead of `cd`), `--only manager,todo`,
 - The first time agents start in a new folder, each tile asks whether you
   trust that folder.
 - The listeners run in a second tmux window (`Ctrl-b n` to see it).
-- In iTerm2, `tmux -CC attach -t oratorio` shows the tiles as native
-  iTerm2 splits.
+- In iTerm2, `tmux -CC attach -t oratorio-<name>` shows the tiles as
+  native iTerm2 splits.
 
 ### Roles
 
@@ -193,6 +222,9 @@ recipient is handed it and finishes it:
 12:49:10  41  dataset finished it
 ```
 
+With `-w NAME` it shows one workspace; without, every workspace on the
+board, with agents shown as `workspace/name`.
+
 It only reads -- watching never marks a message as seen. It checks the
 database once a second, which is plain code and costs no tokens.
 `--once` prints the current state and exits; `--history N` sets how many
@@ -261,7 +293,8 @@ psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
 1. **Postgres**: locally with `orchestration/docker/docker-compose.yml`
    (see its README), or on a remote server (above). Then apply every
    file in `orchestration/schema/` in order (`001_init.sql`,
-   `002_seed_topics.sql`, `003_persistent_agents.sql`).
+   `002_seed_topics.sql`, `003_persistent_agents.sql`,
+   `004_workspaces.sql`).
 2. **Point at it**: put `ORCH_BOARD_DSN=...` in a `.env` file in the repo
    root (gitignored).
 3. **Start the team**: `bin/oratorio up` (see Quick start). It loads
@@ -270,7 +303,8 @@ psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
    `PATH`, or link `bin/oratorio` into a folder that already is.
 
 To run one agent by hand instead (another machine, another tool):
-`python -m orchestration.roles.sync_roles` prints its token once; start
+`python -m orchestration.roles.sync_roles [--workspace NAME]` prints its
+token once; start
 the session with the board's MCP server configured
 (`orchestration/mcp/mcp_config.example.json`), and run
 `python -m orchestration.listener.listen` with `ORCH_BOARD_DSN`,
@@ -300,7 +334,7 @@ pytest tests/ -v
 ## Status
 
 **Verified**
-- All three schema files apply cleanly to Postgres 16, and the whole
+- All four schema files apply cleanly to Postgres 16, and the whole
   suite in `tests/` passes -- against a local database and against a
   remote one through an SSH tunnel (so `LISTEN`/`NOTIFY` works through
   the tunnel).
@@ -312,8 +346,16 @@ pytest tests/ -v
 - Live: adding and removing agents while others keep working, numbered
   experiment agents, saving a workspace and starting again from it.
 
+- Workspace separation, two ways: tests that try every route across
+  (by name, by internal key, by topic, broadcast, reply, raw SQL, the
+  audit view) and are refused; and live, with two workspaces of the same
+  agents running in one folder -- a request in one never showed up in
+  the other.
+
 **Not tried yet**
-- Message traffic with more than two agents at once.
+- Message traffic with more than two agents at once in one workspace.
+- Each agent of a workspace working in its own folder -- all agents of a
+  workspace share its `workdir`.
 
 **Not built yet**
 - **Codex.** The typing mechanism does not care which tool is in the

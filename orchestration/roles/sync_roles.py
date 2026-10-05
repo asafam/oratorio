@@ -14,7 +14,7 @@ it is never written to disk by this script and never re-derivable from the
 stored hash.
 
 Usage:
-    python -m orchestration.roles.sync_roles [--dry-run] [--rotate AGENT_ID]
+    python -m orchestration.roles.sync_roles [--workspace NAME] [--dry-run] [--rotate AGENT]
 """
 from __future__ import annotations
 
@@ -56,7 +56,9 @@ def git_blob_sha(path: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--rotate", metavar="AGENT_ID", help="force a new token for one agent")
+    parser.add_argument("--rotate", metavar="AGENT", help="force a new token for one agent")
+    parser.add_argument("--workspace", default=registry.DEFAULT_WORKSPACE,
+                        help=f"workspace to put the agents in (default: {registry.DEFAULT_WORKSPACE})")
     args = parser.parse_args()
 
     role_files = sorted(ROLES_DIR.glob("*.md"))
@@ -76,19 +78,20 @@ def main() -> None:
             continue
 
         with pool.connection() as conn:
-            existing = registry.get_role(conn, agent_id)
+            existing = registry.find_agent(conn, args.workspace, agent_id)
             need_token = existing is None or agent_id == args.rotate
             if need_token:
                 token = auth.generate_token()
                 token_hash = auth.hash_token(token)
             else:
                 token_hash = conn.execute(
-                    "SELECT auth_token_hash FROM board.agent WHERE agent_id = %s", (agent_id,)
+                    "SELECT auth_token_hash FROM board.agent WHERE agent_id = %s", (existing,)
                 ).fetchone()[0]
 
-            registry.upsert_agent(
+            key = registry.upsert_agent(
                 conn,
-                agent_id=agent_id,
+                name=agent_id,
+                workspace=args.workspace,
                 role_doc_path=str(path.relative_to(ROLES_DIR.parents[1])),
                 role_version=role_version,
                 brief=body,
@@ -97,6 +100,8 @@ def main() -> None:
                 auth_token_hash=token_hash,
                 is_auditor=bool(meta.get("is_auditor", False)),
             )
+            if need_token and existing is not None:  # --rotate: upsert never touches a token
+                registry.set_auth_token_hash(conn, key, token_hash)
             conn.commit()
 
         print(f"synced {agent_id!r} (version={role_version})")

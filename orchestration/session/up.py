@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
-"""Run the agent team in one tiled tmux window: one pane per agent, plus
+"""Run a team of agents in one tiled tmux window: one pane per agent, plus
 the board view. Each agent is an ordinary interactive Claude Code session
 you can watch and type in; a listener per agent (second tmux window) types
 board messages into its pane whenever it is idle.
 
-    oratorio up [--workdir DIR] [--only a,b] [--model M]   start the team
-    oratorio add <agent>                                    add one while running
-    oratorio remove <agent>                                 close one
-    oratorio save                                           write oratorio.yaml
-    oratorio status
-    oratorio down
+    oratorio up [-w NAME] [--only a,b] [--model M]    start a workspace
+    oratorio add <agent> [-w NAME]                     add one while running
+    oratorio remove <agent> [-w NAME]                  close one
+    oratorio save [-w NAME]                            write its yaml file
+    oratorio attach [-w NAME]                          open its tiles
+    oratorio status                                    every running workspace
+    oratorio down [-w NAME | --all]
 
 (`oratorio` is bin/oratorio; or run this file with the venv's python.)
 
-A workspace is a research folder with an `oratorio.yaml` in it:
+A workspace is a name plus a team. Several can run at once -- on the
+board they are separate: `manager` in one never sees messages from
+another (schema/004_workspaces.sql). Each gets its own tmux session,
+`oratorio-<name>`.
 
+A workspace can be described in a yaml file, in any folder:
+
+    name: thesis
+    workdir: .                   # where its agents work; default: the file's folder
     agents: [manager, todo, experiment-1, experiment-2]
     model: sonnet                # optional: one model for every agent
     permission_mode: acceptEdits
 
-`up` in that folder starts exactly those agents; `save` writes the file
-from whatever is running now.
+Name the file `oratorio.yaml`, or `<anything>.oratorio.yaml` to keep
+several in one folder. `-w NAME` always says which workspace you mean.
+Leaving it out is a shortcut: `up` uses the folder's only workspace file
+(or, with none, names the workspace after the folder); the other commands
+use the folder's running workspace, or the only one running.
 
 Agents come from the role files in orchestration/roles/*.md. A role
 marked `multiple: true` can run as several numbered agents: `add
@@ -28,10 +39,9 @@ experiment` starts `experiment-1`, again gives `experiment-2`, and so on.
 
 Each agent gets a fresh token when it starts (its previous one stops
 working), so nothing secret is kept between runs; per-run files live in
-.oratorio/ (gitignored). Nothing here spends tokens on its own: sessions
-start idle and only work when a message, or you, gives them something.
-
-One workspace runs at a time -- all agents share one board.
+.oratorio/<workspace>/ (gitignored). Nothing here spends tokens on its
+own: sessions start idle and only work when a message, or you, gives
+them something.
 """
 from __future__ import annotations
 
@@ -52,15 +62,72 @@ sys.path.insert(0, str(REPO))
 from orchestration.board_core import auth, db, registry  # noqa: E402
 from orchestration.roles.sync_roles import ROLES_DIR, git_blob_sha, parse_role_file  # noqa: E402
 
-SESSION = "oratorio"
-RUN_DIR = REPO / ".oratorio"
-STATE_FILE = RUN_DIR / "state.json"
+RUN_ROOT = REPO / ".oratorio"
 WORKSPACE_FILE = "oratorio.yaml"
+WORKSPACE_SUFFIX = ".oratorio.yaml"
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,40}")
+
+# The workspace this invocation is acting on -- set by use_workspace().
+WORKSPACE = ""
+SESSION = ""
+RUN_DIR = RUN_ROOT
+STATE_FILE = RUN_ROOT / "state.json"
+
+
+def use_workspace(name: str) -> None:
+    global WORKSPACE, SESSION, RUN_DIR, STATE_FILE
+    if not NAME_RE.fullmatch(name):
+        sys.exit(f"'{name}' is not a usable workspace name: lowercase letters, digits, - and _ only.")
+    WORKSPACE = name
+    SESSION = f"oratorio-{name}"
+    RUN_DIR = RUN_ROOT / name
+    STATE_FILE = RUN_DIR / "state.json"
+
+
+def slug(text: str) -> str:
+    """A folder or file name turned into a workspace name."""
+    return re.sub(r"[^a-z0-9_-]+", "-", text.lower()).strip("-_")[:41] or "workspace"
+
+
+def workspace_files(folder: Path) -> dict[str, Path]:
+    """Workspace name -> yaml file, for the workspace files in `folder`."""
+    found = {}
+    for path in sorted(folder.glob("*" + WORKSPACE_SUFFIX)) + [folder / WORKSPACE_FILE]:
+        if not path.is_file() or path in found.values():
+            continue
+        data = yaml.safe_load(path.read_text()) or {}
+        fallback = folder.resolve().name if path.name == WORKSPACE_FILE else path.name[: -len(WORKSPACE_SUFFIX)]
+        found[data.get("name") or slug(fallback)] = path
+    return found
+
+
+def running_workspaces() -> list[str]:
+    if not RUN_ROOT.exists():
+        return []
+    sessions = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                              capture_output=True, text=True).stdout.split()
+    return sorted(d.name for d in RUN_ROOT.iterdir()
+                  if d.is_dir() and (d / "state.json").exists() and f"oratorio-{d.name}" in sessions)
+
+
+def pick_running_workspace(args) -> None:
+    """For every command except `up`: which running workspace is meant?"""
+    if args.workspace:
+        return use_workspace(args.workspace)
+    running = running_workspaces()
+    if not running:
+        sys.exit("Nothing is running.")
+    here = [name for name in workspace_files(Path.cwd()) if name in running]
+    if len(here) == 1:
+        return use_workspace(here[0])
+    if len(running) == 1:
+        return use_workspace(running[0])
+    sys.exit(f"Several workspaces are running ({', '.join(running)}). Say which one with -w NAME.")
 DEFAULT_PERMISSION_MODE = "acceptEdits"
 MCP_SERVER_NAME = "orchestration-board"
 
 PROTOCOL = """\
-# You are `{agent_id}`, one agent in a team that works through a shared message board
+# You are `{agent_id}`, one agent in the `{workspace}` team, which works through a shared message board
 
 You never talk to the other agents directly -- only through the board
 tools (`{mcp}`), and they answer the same way. The team changes while you
@@ -159,8 +226,9 @@ def resolve_agent(name: str, roles: dict[str, Path], taken: set[str]) -> tuple[s
 
 
 def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
-    """Load one role file into the board as `agent_id` and give it a fresh
-    token. Returns (frontmatter, brief, token)."""
+    """Load one role file into the board as the agent called `agent_id`
+    in the current workspace, and give it a fresh token. Returns
+    (frontmatter, brief, token)."""
     meta, brief = parse_role_file(path)
     brief = brief.replace("{agent_id}", agent_id)
     topics = meta.get("topics", [])
@@ -169,9 +237,10 @@ def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
             "INSERT INTO board.topic (topic) VALUES (%s) ON CONFLICT DO NOTHING", (topic,)
         )
     token = auth.generate_token()
-    registry.upsert_agent(
+    key = registry.upsert_agent(
         conn,
-        agent_id=agent_id,
+        name=agent_id,
+        workspace=WORKSPACE,
         role_doc_path=str(path.relative_to(REPO)),
         role_version=git_blob_sha(path),
         brief=brief,
@@ -180,7 +249,7 @@ def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
         auth_token_hash=auth.hash_token(token),
         is_auditor=bool(meta.get("is_auditor", False)),
     )
-    registry.set_auth_token_hash(conn, agent_id, auth.hash_token(token))
+    registry.set_auth_token_hash(conn, key, auth.hash_token(token))
     return meta, brief, token
 
 
@@ -218,7 +287,7 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
 
     prompt = RUN_DIR / f"{agent_id}.prompt.md"
     prompt.write_text(
-        PROTOCOL.format(agent_id=agent_id, mcp=MCP_SERVER_NAME) + brief + "\n"
+        PROTOCOL.format(agent_id=agent_id, workspace=WORKSPACE, mcp=MCP_SERVER_NAME) + brief + "\n"
     )
 
     command = [
@@ -338,33 +407,50 @@ def connect():
 
 
 def cmd_up(args) -> None:
+    folder = Path(args.workdir or ".").resolve()
+    files = workspace_files(folder)
+    if args.workspace:
+        name = args.workspace
+    elif len(files) == 1:
+        name = next(iter(files))
+    elif not files:
+        name = slug(folder.name)
+    else:
+        sys.exit(f"This folder has several workspaces ({', '.join(files)}). Say which one with -w NAME.")
+    use_workspace(name)
     if session_exists():
-        sys.exit(f"Already running. Attach with `tmux attach -t {SESSION}`, add agents with "
-                 "`add`, or stop with `down`.")
-    workdir = Path(args.workdir).resolve()
-    workspace_file = workdir / WORKSPACE_FILE
-    workspace = (yaml.safe_load(workspace_file.read_text()) or {}) if workspace_file.exists() else {}
+        sys.exit(f"Workspace '{name}' is already running. Open it with `oratorio attach -w {name}`, "
+                 "add agents with `add`, or stop it with `down`.")
+
+    file = files.get(name)
+    workspace = (yaml.safe_load(file.read_text()) or {}) if file else {}
+    workdir = (file.parent / workspace["workdir"]).resolve() if workspace.get("workdir") else folder
+    if not workdir.is_dir():
+        sys.exit(f"Working folder does not exist: {workdir}")
 
     roles = role_files()
-    # Command line wins over the workspace file, which wins over "every role".
+    # Command line wins over the workspace file, which wins over "one per role".
     names = args.only.split(",") if args.only else workspace.get("agents") or list(roles)
-    wanted: dict[str, str] = {}  # agent_id -> role
-    for name in names:
+    wanted: dict[str, str] = {}  # agent name -> role
+    for entry in names:
         try:
-            agent_id, role = resolve_agent(name, roles, set(wanted))
+            agent_id, role = resolve_agent(entry, roles, set(wanted))
         except ValueError as e:
             sys.exit(str(e))
         wanted[agent_id] = role
 
     state = {
+        "name": name,
         "workdir": str(workdir),
+        "file": str(file) if file else None,
         "model": args.model or workspace.get("model"),
         "permission_mode": args.permission_mode or workspace.get("permission_mode")
                            or DEFAULT_PERMISSION_MODE,
     }
     pool = connect()
+    RUN_ROOT.mkdir(exist_ok=True)
+    RUN_ROOT.chmod(0o700)
     RUN_DIR.mkdir(exist_ok=True)
-    RUN_DIR.chmod(0o700)
     for stale in RUN_DIR.iterdir():  # left over from a run that was not shut down cleanly
         stale.unlink()
     STATE_FILE.write_text(json.dumps(state, indent=2))
@@ -375,19 +461,21 @@ def cmd_up(args) -> None:
     db.close_pool()
 
     board = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", str(REPO), "-P", "-F",
-                 "#{pane_id}", f"{shlex.quote(sys.executable)} -m orchestration.watch.board")
-    tmux("select-pane", "-t", board, "-T", "BOARD")
+                 "#{pane_id}",
+                 f"{shlex.quote(sys.executable)} -m orchestration.watch.board -w {shlex.quote(name)}")
+    tmux("select-pane", "-t", board, "-T", f"BOARD: {name}")
     retile()
 
-    source = f" (from {WORKSPACE_FILE})" if workspace and not args.only else ""
-    print(f"Started {len(wanted)} agent(s){source}: {', '.join(wanted)}")
-    print(f"Working directory: {workdir}")
-    print(f"Watch them:  tmux attach -t {SESSION}")
+    source = f" from {file.name}" if file and not args.only else ""
+    print(f"Started workspace '{name}'{source}: {', '.join(wanted)}")
+    print(f"Working folder: {workdir}")
+    print(f"Open it:  oratorio attach -w {name}")
 
 
 def cmd_add(args) -> None:
+    pick_running_workspace(args)
     if not session_exists():
-        sys.exit("Nothing is running yet. Start with `up` first.")
+        sys.exit(f"Workspace '{WORKSPACE}' is not running. Start it with `up` first.")
     roles = role_files()
     running = set(running_agents())
     try:
@@ -403,13 +491,14 @@ def cmd_add(args) -> None:
     with pool.connection() as conn:
         start_agent(conn, agent_id, roles[role], state)
     db.close_pool()
-    print(f"Added {agent_id}.")
+    print(f"Added {agent_id} to '{WORKSPACE}'.")
 
 
 def cmd_remove(args) -> None:
+    pick_running_workspace(args)
     record = running_agents().get(args.agent)
     if record is None:
-        sys.exit(f"'{args.agent}' is not running.")
+        sys.exit(f"'{args.agent}' is not running in '{WORKSPACE}'.")
     for key in ("ORCH_LISTENER_PANE", "ORCH_TMUX_PANE"):
         if record.get(key):
             subprocess.run(["tmux", "kill-pane", "-t", record[key]], capture_output=True)
@@ -434,71 +523,116 @@ def _team_order(roles: dict[str, Path]):
 
 
 def cmd_save(args) -> None:
+    pick_running_workspace(args)
     agents = running_agents()
     if not agents:
         sys.exit("Nothing is running, so there is nothing to save.")
     state = load_state()
-    workspace = {"agents": sorted(agents, key=_team_order(role_files()))}
+    workdir = Path(state["workdir"])
+    if state.get("file"):
+        target = Path(state["file"])
+    else:  # first save: the plain name if it is free, else one named after the workspace
+        target = workdir / WORKSPACE_FILE
+        if target.exists():
+            target = workdir / f"{WORKSPACE}{WORKSPACE_SUFFIX}"
+
+    workspace = {
+        "name": WORKSPACE,
+        "workdir": os.path.relpath(workdir, target.parent),
+        "agents": sorted(agents, key=_team_order(role_files())),
+    }
     if state.get("model"):
         workspace["model"] = state["model"]
     workspace["permission_mode"] = state["permission_mode"]
-    target = Path(state["workdir"]) / WORKSPACE_FILE
     target.write_text(
-        "# Oratorio workspace: `oratorio up` in this folder starts these agents.\n"
+        f"# Oratorio workspace. Start it from this folder with: oratorio up -w {WORKSPACE}\n"
         + yaml.safe_dump(workspace, sort_keys=False, default_flow_style=None)
     )
-    print(f"Saved {len(agents)} agent(s) to {target}")
+    STATE_FILE.write_text(json.dumps({**state, "file": str(target)}, indent=2))
+    print(f"Saved '{WORKSPACE}' ({len(agents)} agent(s)) to {target}")
 
 
 def cmd_status(args) -> None:
-    agents = running_agents()
-    if not agents:
+    running = running_workspaces()
+    if not running:
         print("Nothing is running.")
         return
-    state = load_state()
-    print(f"Working directory: {state.get('workdir')}")
-    print(f"Running: {', '.join(agents)}")
     roles = role_files()
-    addable = [r for r, path in roles.items() if is_multiple(path) or r not in agents]
-    if addable:
-        print(f"Can add: {', '.join(addable)}")
+    for name in running:
+        use_workspace(name)
+        agents = running_agents()
+        print(f"{name}   ({load_state().get('workdir')})")
+        print(f"  running: {', '.join(agents) or '(no agents)'}")
+        addable = [r for r, path in roles.items() if is_multiple(path) or r not in agents]
+        if addable:
+            print(f"  can add: {', '.join(addable)}")
 
 
-def cmd_down(args) -> None:
+def cmd_attach(args) -> None:
+    pick_running_workspace(args)
+    if not session_exists():
+        sys.exit(f"Workspace '{WORKSPACE}' is not running.")
+    # Inside tmux already: switch to it. Otherwise: attach this terminal.
+    verb = "switch-client" if os.environ.get("TMUX") else "attach-session"
+    os.execvp("tmux", ["tmux", verb, "-t", SESSION])
+
+
+def stop_workspace() -> None:
     if session_exists():
         tmux("kill-session", "-t", SESSION)
-        print("Stopped.")
-    else:
-        print("Nothing is running.")
+        print(f"Stopped '{WORKSPACE}'.")
     if RUN_DIR.exists():  # tokens in these files are dead weight once the sessions are gone
         for f in RUN_DIR.iterdir():
             f.unlink()
+        RUN_DIR.rmdir()
+
+
+def cmd_down(args) -> None:
+    if args.all:
+        running = running_workspaces()
+        if not running:
+            print("Nothing is running.")
+        for name in running:
+            use_workspace(name)
+            stop_workspace()
+        return
+    pick_running_workspace(args)
+    if not session_exists():
+        print(f"Workspace '{WORKSPACE}' is not running.")
+    stop_workspace()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="oratorio", description="Run the agent team in a tiled tmux window.")
+    parser = argparse.ArgumentParser(prog="oratorio", description="Run teams of agents in tiled tmux windows.")
     sub = parser.add_subparsers(dest="command", required=True)
+    which = argparse.ArgumentParser(add_help=False)
+    which.add_argument("-w", "--workspace", metavar="NAME", help="which workspace (see the shortcuts in --help of `up`)")
 
-    p = sub.add_parser("up", help="start the team")
-    p.add_argument("--workdir", default=".", help="folder the agents work in (default: current)")
-    p.add_argument("--only", help=f"comma-separated agents to start (default: {WORKSPACE_FILE}, else every role)")
+    p = sub.add_parser("up", parents=[which], help="start a workspace",
+                       description="Start a workspace. Without -w: the only workspace file in the folder, "
+                                   "or, with none, a workspace named after the folder.")
+    p.add_argument("--workdir", metavar="DIR", help="folder to look in for workspace files (default: current)")
+    p.add_argument("--only", help="comma-separated agents to start (default: the workspace file, else one per role)")
     p.add_argument("--model", help="one model for every agent (default: each role's own)")
     p.add_argument("--permission-mode",
                    help=f"Claude Code permission mode for the agents (default: {DEFAULT_PERMISSION_MODE})")
     p.set_defaults(run=cmd_up)
 
-    p = sub.add_parser("add", help="add one agent to the running team")
-    p.add_argument("agent", help="a role (experiment -> next free experiment-N) or an exact agent id")
+    p = sub.add_parser("add", parents=[which], help="add one agent to a running workspace")
+    p.add_argument("agent", help="a role (experiment -> next free experiment-N) or an exact agent name")
     p.add_argument("--model", help="model for this agent (default: same as the rest)")
     p.set_defaults(run=cmd_add)
 
-    p = sub.add_parser("remove", help="close one agent")
+    p = sub.add_parser("remove", parents=[which], help="close one agent")
     p.add_argument("agent")
     p.set_defaults(run=cmd_remove)
 
-    sub.add_parser("save", help=f"write the running team to {WORKSPACE_FILE} in the working folder").set_defaults(run=cmd_save)
-    sub.add_parser("status", help="what is running").set_defaults(run=cmd_status)
-    sub.add_parser("down", help="stop everything").set_defaults(run=cmd_down)
+    sub.add_parser("save", parents=[which], help="write the running team to its yaml file").set_defaults(run=cmd_save)
+    sub.add_parser("attach", parents=[which], help="open a workspace's tiles").set_defaults(run=cmd_attach)
+    sub.add_parser("status", help="every running workspace").set_defaults(run=cmd_status)
+    p = sub.add_parser("down", parents=[which], help="stop a workspace")
+    p.add_argument("--all", action="store_true", help="stop every running workspace")
+    p.set_defaults(run=cmd_down)
 
     args = parser.parse_args()
     load_dotenv()

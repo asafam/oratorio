@@ -50,8 +50,8 @@ def test_long_multiline_content_is_one_short_line():
 
 
 def test_agent_online_and_offline():
-    online = {"agent_id": "monitor", "online": True, "runner": "codex", "last_seen_at": T}
-    never = {"agent_id": "dataset", "online": False, "runner": None, "last_seen_at": None}
+    online = {"label": "monitor", "online": True, "runner": "codex", "last_seen_at": T}
+    never = {"label": "dataset", "online": False, "runner": None, "last_seen_at": None}
     assert "monitor" in board.format_agent(online) and "online (codex)" in board.format_agent(online)
     assert "offline, never seen" in board.format_agent(never)
 
