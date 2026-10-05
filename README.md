@@ -6,10 +6,35 @@ work together. Each agent is a normal, long-lived session in its own
 terminal. Agents send each other messages through the board and keep
 their own conversation context while they work.
 
-Ships with five example roles for a typical research/eval workflow --
-`evaluator`, `monitor`, `dataset`, `experiment-manager`, `overseer` -- as a
-starting point. Adapt the role files under `orchestration/roles/` to your
-own project; nothing else in this repo is specific to that example.
+Ships with a small research team as a starting point -- `manager`,
+`todo`, `experiment-1`, `experiment-2`, `documenter` -- and one command
+that opens them all as tiles in a single terminal window, next to a live
+view of what they are saying to each other. Adapt the role files under
+`orchestration/roles/` to your own project; nothing else in this repo is
+specific to that team.
+
+## Quick start
+
+```bash
+orchestration/ops/scripts/board_tunnel.sh up        # only if the board is remote
+python -m orchestration.session.up --workdir ~/my-research
+tmux attach -t oratorio
+```
+
+You get one tile per agent plus a `BOARD` tile. Click a tile to type in
+it. Give your goal to `manager`; it hands work to the others through the
+board. Stop everything with `python -m orchestration.session.up --down`.
+
+- `--only manager,todo` starts just those agents.
+- `--model haiku` uses one model for all of them (each role file names
+  its own otherwise).
+- `--permission-mode` sets how much the agents may do without asking you
+  (Claude Code's own modes; default `acceptEdits` -- they edit files
+  freely but still ask before running most commands, so expect to
+  approve things in their tiles).
+- The first time agents start in a new directory, each tile asks whether
+  you trust that folder.
+- The listeners run in a second tmux window (`Ctrl-b n` to see it).
 
 ## How it works
 
@@ -68,13 +93,34 @@ Two separate steps, on purpose:
    a heartbeat going. `list_agents` shows who is online. Agents only
    ever know the board, never each other's addresses.
 
+### Getting a message into a live session
+
+The listener types it into the agent's tmux pane, the way you would.
+Every board line starts with `[board message <id> from <sender>]`, so the
+agent can tell it from you typing. This needs nothing from the agent
+tool except a terminal, so it is the same for Claude Code and Codex.
+
+It never types while the agent is busy. The agent's own hooks keep an
+"idle" flag file: there while it waits for input, gone while it works.
+The listener hands over one message, then waits for idle before the next.
+
+Known limit: if you have half-typed text sitting in an idle tile when a
+board message arrives, the message is typed on top of it.
+
 ### Keeping context under control
 
 Each agent is an ordinary interactive session, so you can type `/compact`
-or `/clear` in its terminal whenever you like. Messages carry a
-`thread_id`; the listener flags a message that starts a different thread
-than the last one (`new_thread`), as the cue that a clear/compact may be
-worth doing first. Acting on that cue is not built yet (see below).
+or `/clear` in its tile whenever you like. Three things keep that from
+being needed often, or from losing work:
+
+- Role files tell agents to push heavy work into subagents and keep only
+  the summary.
+- Messages carry a `thread_id`. When a message starts a different thread
+  than the previous one, a note is typed with it saying this is a good
+  moment for `/compact` or `/clear`. Nothing outside the session can run
+  those commands -- the note is for you.
+- After a `/clear`, the listener notices and hands back every message the
+  agent had not finished.
 
 ## Pieces
 
@@ -84,6 +130,7 @@ worth doing first. Acting on that cue is not built yet (see below).
 | `orchestration/docker/` | Postgres container definition. |
 | `orchestration/board_core/` | Post / read / ack / registry logic. No transport in here. |
 | `orchestration/listener/` | One process per agent: `LISTEN`s, registers, heartbeats, hands messages to the session. |
+| `orchestration/session/` | `up.py` starts the team in tmux; `tmux.py` types messages into a pane. |
 | `orchestration/mcp/` | MCP server exposing the board as tools. `server.py` (stdio, agent can reach Postgres directly) / `server_http.py` (agent on another machine). |
 | `orchestration/watch/` | The board view: a live feed of every message, for you to watch. |
 | `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script. |
@@ -176,19 +223,23 @@ psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
 
 ## Bring-up order
 
-1. **Postgres**: `orchestration/docker/docker-compose.yml` (see its
-   README), then apply every file in `orchestration/schema/` in order
-   (`001_init.sql`, `002_seed_topics.sql`, `003_persistent_agents.sql`).
-2. **Sync roles**: `ORCH_BOARD_DSN=... python -m orchestration.roles.sync_roles`
-   -- prints a fresh token per role, shown once. Copy it into that role's
-   own environment, never into git.
-3. **Per agent, the session**: start Claude Code / Codex with the board's
-   MCP server configured (`orchestration/mcp/mcp_config.example.json`).
-4. **Per agent, the listener**:
-   ```bash
-   ORCH_BOARD_DSN=... ORCH_AGENT_TOKEN=<that role's token> ORCH_RUNNER=claude \
-     python -m orchestration.listener.listen
-   ```
+1. **Postgres**: locally with `orchestration/docker/docker-compose.yml`
+   (see its README), or on a remote server (above). Then apply every
+   file in `orchestration/schema/` in order (`001_init.sql`,
+   `002_seed_topics.sql`, `003_persistent_agents.sql`).
+2. **Point at it**: put `ORCH_BOARD_DSN=...` in a `.env` file in the repo
+   root (gitignored).
+3. **Start the team**: `python -m orchestration.session.up` (see Quick
+   start). It loads the role files into the board, gives each agent a
+   fresh token, and starts the sessions, listeners and board view.
+
+To run one agent by hand instead (another machine, another tool):
+`python -m orchestration.roles.sync_roles` prints its token once; start
+the session with the board's MCP server configured
+(`orchestration/mcp/mcp_config.example.json`), and run
+`python -m orchestration.listener.listen` with `ORCH_BOARD_DSN`,
+`ORCH_AGENT_TOKEN`, and -- to have messages typed in -- `ORCH_TMUX_PANE`
+and `ORCH_IDLE_FLAG`.
 
 ## Setup
 
@@ -212,27 +263,27 @@ pytest tests/ -v
 
 ## Status
 
-This repo was just reworked from "start a fresh headless agent per
-message, via webhooks" to the persistent-agent design above. Be clear
-about what that means today:
-
-**Not built yet**
-- **Getting a message into a live session.** The listener's
-  `hand_to_session` only prints each message as a JSON line. Pushing
-  that into a running Claude Code / Codex session, and knowing when the
-  session is idle enough to take it, is the main missing piece.
-- **Acting on `new_thread`** (suggesting or sending `/clear` or
-  `/compact`).
-- **Noticing a `/clear`** and re-handing open messages on its own.
-
 **Verified**
 - All three schema files apply cleanly to Postgres 16, and the whole
-  suite in `tests/` (board, MCP over stdio, listener, board view) passes
-  -- both against a local database and against a remote one through an
-  SSH tunnel (so `LISTEN`/`NOTIFY` works through the tunnel).
-- The board view was run live against demo agents.
+  suite in `tests/` passes -- against a local database and against a
+  remote one through an SSH tunnel (so `LISTEN`/`NOTIFY` works through
+  the tunnel).
+- Live, with real Claude Code sessions started by `session/up.py`: a
+  request typed to `manager` went to `todo` through the board, `todo`
+  did the work and replied, the reply was typed back to `manager`, and
+  both acked. After a `/clear`, the unfinished message was handed back.
+
+**Tried with two agents only**
+- The full five-agent team has not been run together yet.
+
+**Not built yet**
+- **Codex.** The typing mechanism does not care which tool is in the
+  pane, but the idle flag is set by Claude Code hooks, and `up.py` only
+  knows how to start Claude Code.
+- **Protecting a half-typed human draft** in an idle tile (see above).
 
 **Still unverified from before**
 - The `mcp` SDK's `TokenVerifier`/`AuthSettings` wiring in
   `orchestration/mcp/server_http.py`.
-- `server_http.py` across a real network or tunnel.
+- `server_http.py` across a real network or tunnel. (The team started
+  by `up.py` uses the stdio server, which is tested.)

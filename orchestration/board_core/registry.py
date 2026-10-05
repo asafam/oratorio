@@ -55,6 +55,14 @@ def register(
         _set_subscriptions(conn, agent_id, topics)
 
 
+def set_auth_token_hash(conn: Connection, agent_id: str, auth_token_hash: str) -> None:
+    """Replace an agent's token (the old one stops working at once)."""
+    conn.execute(
+        "UPDATE board.agent SET auth_token_hash = %s, updated_at = now() WHERE agent_id = %s",
+        (auth_token_hash, agent_id),
+    )
+
+
 def heartbeat(conn: Connection, agent_id: str) -> None:
     conn.execute("UPDATE board.agent SET last_seen_at = now() WHERE agent_id = %s", (agent_id,))
 

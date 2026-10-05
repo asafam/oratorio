@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Per-run agent files (tokens, MCP config, idle flags) -- see orchestration/session/up.py
+.oratorio/

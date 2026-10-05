@@ -16,16 +16,19 @@ connection or a missed notification only adds latency. Durability lives in
 board.message_delivery (see board_core/messages.py), and holds even while
 this whole process is down for hours.
 
-NOT BUILT YET: `hand_to_session` below only prints each message as one
-JSON line on stdout. Pushing that text into a live Claude Code / Codex
-session (and deciding when the session is idle enough to take it) is the
-missing piece -- replace `hand_to_session` when that mechanism is chosen.
+The session takes one thing at a time: the listener hands over a message
+only while the session is idle, then waits for it to go idle again before
+the next. With ORCH_TMUX_PANE set, "hand over" means typing it into that
+tmux pane (see session/tmux.py); without it, each item is printed as a
+JSON line on stdout instead.
 
 Environment:
     ORCH_BOARD_DSN    Postgres DSN. LISTEN needs a real database
                       connection -- the MCP endpoint alone is not enough.
-    ORCH_AGENT_TOKEN  this agent's token (from sync_roles.py).
+    ORCH_AGENT_TOKEN  this agent's token.
     ORCH_RUNNER       what the session is: claude | codex | ...
+    ORCH_TMUX_PANE    tmux pane id (%N) of the agent's session.
+    ORCH_IDLE_FLAG    file that exists while that session is idle.
 """
 from __future__ import annotations
 
@@ -36,7 +39,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Protocol
 
 import psycopg
 
@@ -44,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestration.board_core import auth, db, messages, registry  # noqa: E402
 from orchestration.listener import channels  # noqa: E402
+from orchestration.session.tmux import TmuxSession  # noqa: E402
 
 logger = logging.getLogger("orchestration.listener")
 
@@ -52,21 +56,40 @@ RECONNECT_DELAY_SECONDS = 5
 # registry.ONLINE_WINDOW_SECONDS or the agent flickers offline.
 HEARTBEAT_SECONDS = 30
 
-Handler = Callable[[dict[str, Any]], None]
+# How often to look at whether a busy session has gone idle. A local
+# check (no database, no model) -- only does anything while work is waiting.
+IDLE_CHECK_SECONDS = 1
 
 
-def hand_to_session(item: dict[str, Any]) -> None:
-    """STUB -- see the module docstring. One JSON line per item."""
-    print(json.dumps(item, default=str), flush=True)
+class Session(Protocol):
+    def ready(self) -> bool: ...          # idle and able to take one item now
+    def was_cleared(self) -> bool: ...    # context was wiped since last asked
+    def hand(self, item: dict[str, Any]) -> None: ...
+
+
+class StdoutSession:
+    """Fallback when there is no pane to type into: one JSON line per item."""
+
+    def ready(self) -> bool:
+        return True
+
+    def was_cleared(self) -> bool:
+        return False
+
+    def hand(self, item: dict[str, Any]) -> None:
+        print(json.dumps(item, default=str), flush=True)
 
 
 class Listener:
-    def __init__(self, agent_id: str, runner: str, handler: Handler = hand_to_session):
+    def __init__(self, agent_id: str, runner: str, session: Session | None = None):
         self.agent_id = agent_id
         self.runner = runner
-        self.handler = handler
+        self.session = session or StdoutSession()
         self._last_thread_id: str | None = None
-        # A NOTIFY-triggered sweep and the periodic one run on different
+        self._timeout_notes: list[dict[str, Any]] = []
+        # True while something is waiting for the session to go idle.
+        self.backlog = False
+        # A NOTIFY-triggered sweep and the timed ones run on different
         # worker threads -- without this they could hand over the same message twice.
         self._sweep_lock = threading.Lock()
 
@@ -82,27 +105,66 @@ class Listener:
             logger.info("agent=%s re-queued %d unacked message(s)", self.agent_id, requeued)
 
     def sweep(self) -> None:
-        """Hand over everything waiting, then any reply deadlines that have
-        passed. A message is marked delivered only after the hand-off
-        returned -- if the handler raises, it stays on the work list."""
+        """Hand over what is waiting, one item per idle moment: messages
+        first, then any reply deadlines that have passed. A message is
+        marked delivered only after the hand-off returned -- if that
+        raises, it stays on the work list."""
         with self._sweep_lock, db.get_pool().connection() as conn:
             registry.heartbeat(conn, self.agent_id)
+            if self.session.was_cleared():
+                requeued = messages.requeue_unacked(conn, self.agent_id)
+                logger.info("agent=%s session was cleared, re-queued %d open message(s)",
+                            self.agent_id, requeued)
             conn.commit()
-            for msg in messages.undelivered(conn, self.agent_id):
-                # A different thread than the last message means new work --
-                # the cue for suggesting a /clear or /compact first.
-                new_thread = msg["thread_id"] is not None and msg["thread_id"] != self._last_thread_id
-                self.handler({"kind": "message", "new_thread": new_thread, **msg})
-                self._last_thread_id = msg["thread_id"]
-                messages.mark_delivered(conn, self.agent_id, [msg["id"]])
-                conn.commit()
-            for req in messages.claim_overdue_requests(conn, self.agent_id):
-                self.handler({"kind": "reply_timeout", **req})
+            self._timeout_notes += messages.claim_overdue_requests(conn, self.agent_id)
             conn.commit()
+
+            while self.session.ready():
+                waiting = messages.undelivered(conn, self.agent_id, limit=1)
+                if waiting:
+                    msg = waiting[0]
+                    # A different thread than the last message handed in means
+                    # new work -- the cue for suggesting a /clear or /compact
+                    # first. Never on the first message: there is nothing to clear.
+                    new_thread = (
+                        self._last_thread_id is not None
+                        and msg["thread_id"] is not None
+                        and msg["thread_id"] != self._last_thread_id
+                    )
+                    self.session.hand({"kind": "message", "new_thread": new_thread, **msg})
+                    self._last_thread_id = msg["thread_id"] or self._last_thread_id
+                    messages.mark_delivered(conn, self.agent_id, [msg["id"]])
+                    conn.commit()
+                elif self._timeout_notes:
+                    self.session.hand({"kind": "reply_timeout", **self._timeout_notes.pop(0)})
+                else:
+                    break
+            self.backlog = bool(self._timeout_notes) or bool(
+                messages.undelivered(conn, self.agent_id, limit=1)
+            )
+
+    def wants_sweep(self) -> bool:
+        """Cheap local check: is there a reason to sweep right now, other
+        than a NOTIFY or the heartbeat timer?"""
+        if isinstance(self.session, TmuxSession) and self.session.cleared_marker.exists():
+            return True
+        return self.backlog and self.session.ready()
 
     def channels(self) -> set[str]:
         with db.get_pool().connection() as conn:
             return channels.agent_channels(conn, self.agent_id)
+
+
+async def _idle_watch(listener: Listener) -> None:
+    """Notices the session going idle (or being cleared) while work is
+    waiting -- nothing NOTIFYs for that, it is a local file appearing."""
+    while True:
+        await asyncio.sleep(IDLE_CHECK_SECONDS)
+        try:
+            if listener.wants_sweep():
+                await asyncio.to_thread(listener.sweep)
+        except Exception:
+            logger.exception("idle-triggered sweep failed")
 
 
 async def _periodic_sweep(listener: Listener) -> None:
@@ -129,6 +191,7 @@ async def run(listener: Listener) -> None:
             logger.warning("board not reachable yet (%s) -- retrying in %ds", e, RECONNECT_DELAY_SECONDS)
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
     periodic = asyncio.create_task(_periodic_sweep(listener))
+    idle_watch = asyncio.create_task(_idle_watch(listener))
 
     try:
         while True:
@@ -161,6 +224,7 @@ async def run(listener: Listener) -> None:
                 await asyncio.sleep(RECONNECT_DELAY_SECONDS)
     finally:
         periodic.cancel()
+        idle_watch.cancel()
 
 
 def main() -> None:
@@ -175,7 +239,11 @@ def main() -> None:
         except auth.AuthError as e:
             print(f"ORCH_AGENT_TOKEN rejected: {e}", file=sys.stderr)
             sys.exit(1)
-    asyncio.run(run(Listener(agent_id, os.environ.get("ORCH_RUNNER", "claude"))))
+    session: Session | None = None
+    pane, idle_flag = os.environ.get("ORCH_TMUX_PANE"), os.environ.get("ORCH_IDLE_FLAG")
+    if pane and idle_flag:
+        session = TmuxSession(pane, Path(idle_flag))
+    asyncio.run(run(Listener(agent_id, os.environ.get("ORCH_RUNNER", "claude"), session)))
 
 
 if __name__ == "__main__":
