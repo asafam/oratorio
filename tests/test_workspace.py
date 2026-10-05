@@ -100,3 +100,9 @@ def test_iterm_window_is_split_into_the_same_grid_row_by_row():
 
 def test_iterm_commands_are_quoted_for_applescript():
     assert '& "say \\"hi\\""' in iterm_script(['say "hi"'])
+
+
+def test_iterm_splits_can_go_in_a_new_tab_instead_of_a_new_window():
+    script = iterm_script(["a", "b", "c", "d"], tab=True)
+    assert "create tab" in script and "create window" not in script
+    assert "tell s0 to set s1 to (split vertically" in script

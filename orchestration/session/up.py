@@ -11,7 +11,7 @@ board messages into its pane whenever it is idle.
     oratorio save [-w NAME]                            write its yaml file
     oratorio attach [-w NAME]                          open its tiles
     oratorio open <agent|board> [-w NAME]              show one agent alone in this terminal
-    oratorio open --all [-w NAME]                      iTerm2: a new window, one split each
+    oratorio open --all [--tab] [-w NAME]              iTerm2: a new window (or tab), one split each
     oratorio status                                    every running workspace
     oratorio down [-w NAME | --all]
 
@@ -774,16 +774,21 @@ def screen_bounds() -> str | None:
     return bounds if done.returncode == 0 and re.fullmatch(r"-?\d+(, -?\d+){3}", bounds) else None
 
 
-def iterm_script(commands: list[str], bounds: str | None = None) -> str:
+def iterm_script(commands: list[str], bounds: str | None = None, tab: bool = False) -> str:
     """AppleScript that opens a new iTerm2 window (filling `bounds`, if
-    given), split into a grid with one split per command, filled row by
-    row. A last row that is not full is spread over the whole width."""
+    given) -- or, with `tab`, a new tab in the window in front -- split
+    into a grid with one split per command, filled row by row. A last row
+    that is not full is spread over the whole width."""
     _, columns = grid(len(commands))
-    lines = ['tell application "iTerm2"', "activate",
-             "set w to (create window with default profile)"]
-    if bounds:
-        lines += [f"set bounds of w to {{{bounds}}}", "delay 0.3"]  # let it resize before splitting
-    lines.append("set s0 to current session of w")
+    lines = ['tell application "iTerm2"', "activate"]
+    if tab:
+        lines += ["tell current window to set t to (create tab with default profile)",
+                  "set s0 to current session of t"]
+    else:
+        lines.append("set w to (create window with default profile)")
+        if bounds:
+            lines += [f"set bounds of w to {{{bounds}}}", "delay 0.3"]  # let it resize before splitting
+        lines.append("set s0 to current session of w")
     for i in range(columns, len(commands), columns):  # the first split of every later row
         lines.append(f"tell s{i - columns} to set s{i} to (split horizontally with default profile)")
     for i in range(len(commands)):  # then each row, left to right
@@ -796,7 +801,7 @@ def iterm_script(commands: list[str], bounds: str | None = None) -> str:
     return "\n".join(lines + ["end tell"])
 
 
-def open_all_in_iterm(panes: dict[str, str]) -> None:
+def open_all_in_iterm(panes: dict[str, str], tab: bool = False) -> None:
     agents = [a for a in panes if a != "board"]
     order = tile_order(agents, role_files(), len(panes), load_state().get("tiles"))
     order += ["board"] if "board" in panes else []
@@ -805,11 +810,12 @@ def open_all_in_iterm(panes: dict[str, str]) -> None:
     retile()
     me = shlex.quote(str(REPO / "bin" / "oratorio"))
     commands = [f"{me} open {shlex.quote(name)} -w {shlex.quote(WORKSPACE)}" for name in order]
-    done = subprocess.run(["osascript", "-e", iterm_script(commands, screen_bounds())], capture_output=True, text=True)
+    done = subprocess.run(["osascript", "-e", iterm_script(commands, None if tab else screen_bounds(), tab)],
+                          capture_output=True, text=True)
     if done.returncode != 0:
         sys.exit(f"Could not drive iTerm2 ({done.stderr.strip()}). Open each one yourself, in a "
                  f"terminal of its own: oratorio open <{'|'.join(order)}>")
-    print(f"Opened in a new iTerm2 window: {', '.join(order)}")
+    print(f"Opened in a new iTerm2 {'tab' if tab else 'window'}: {', '.join(order)}")
 
 
 def cmd_open(args) -> None:
@@ -821,7 +827,9 @@ def cmd_open(args) -> None:
         sys.exit(f"Workspace '{WORKSPACE}' is not running.")
     panes = openable()
     if args.all:
-        return open_all_in_iterm(panes)
+        return open_all_in_iterm(panes, args.tab)
+    if args.tab:
+        sys.exit("--tab goes with --all. For one agent, open a tab yourself and run `oratorio open <agent>` in it.")
     if not args.agent:
         sys.exit(f"Say which one to open ({', '.join(panes)}), or --all.")
     if os.environ.get("TMUX"):
@@ -912,6 +920,8 @@ def main() -> None:
     p.add_argument("agent", nargs="?", help="an agent name, or `board`")
     p.add_argument("--all", action="store_true",
                    help="iTerm2 only: open a new window with a split for every agent and the board")
+    p.add_argument("--tab", action="store_true",
+                   help="with --all: a new tab in the iTerm2 window in front, instead of a new window")
     p.set_defaults(run=cmd_open)
     sub.add_parser("status", help="every running workspace").set_defaults(run=cmd_status)
     p = sub.add_parser("down", parents=[which], help="stop a workspace")
