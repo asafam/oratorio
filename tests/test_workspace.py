@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from orchestration.session.up import _team_order, model_for, parse_agents, iterm_script, resolve_agent, role_files, tile_order
+from orchestration.session.up import _team_order, carried_settings, model_for, parse_agents, iterm_script, resolve_agent, role_files, tile_order
 
 ROLES = role_files()
 
@@ -114,3 +114,13 @@ def test_iterm_splits_can_go_under_the_terminal_the_command_was_typed_in():
     assert "create window" not in script and "create tab" not in script
     assert "tell con to set s0 to (split horizontally" in script   # the console keeps the top
     assert "tell con to write text" not in script                  # and nothing is typed into it
+
+
+def test_agents_take_over_auto_mode_settings_and_the_status_line_only_when_asked(tmp_path):
+    mine = tmp_path / "settings.json"
+    mine.write_text('{"statusLine": {"type": "command", "command": "x.sh"}, "hooks": {"Stop": []}, '
+                    '"enabledPlugins": {"p": true}, "skipAutoPermissionPrompt": true}')
+    assert carried_settings(settings_file=mine) == {"skipAutoPermissionPrompt": True}
+    assert carried_settings(True, mine) == {
+        "skipAutoPermissionPrompt": True, "statusLine": {"type": "command", "command": "x.sh"}}
+    assert carried_settings(True, tmp_path / "missing.json") == {}

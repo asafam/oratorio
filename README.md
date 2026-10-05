@@ -30,10 +30,11 @@ work to the others through the board.
 |---|---|
 | `oratorio up` | Starts a workspace. |
 | `oratorio attach` | Opens its tiles. |
-| `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... |
+| `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... With `--here` (iTerm2) it also appears in a new split under the terminal you typed it in. |
+| `oratorio restart experiment-2` | Starts that agent afresh in the same tile or terminal: an empty conversation, and the current role file, model and settings. Messages it had not finished are handed to it again. `--all` restarts every agent; `--model opus` also changes its model. |
 | `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
 | `oratorio open manager` | Shows that one agent (or `board`) alone in the terminal you type it in, so you can arrange agents yourself in your terminal's own splits or tabs. Closing the terminal closes nothing; run it again to get the agent back. |
-| `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board. Add `--tab` for a new tab in the current window instead, or `--here` to put the splits under the terminal you typed it in, which stays on top as your console. |
+| `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board, plus a plain console in the working folder for typing commands. Each split is labelled with the agent and its model, `manager (fable)`. Add `--tab` for a new tab in the current window instead, or `--here` to put the splits under the terminal you typed it in, which stays on top as your console. |
 | `oratorio tile manager experiment-1` | Arranges the tiles in that order, row by row; agents you leave out follow. With no names: the automatic order, which keeps numbered agents side by side. Also brings back any agent you opened on its own. |
 | `oratorio save` | Writes the running team to the workspace's yaml file. |
 | `oratorio status` | Every running workspace, and what can be added to each. |
@@ -57,7 +58,7 @@ agents:
   experiment-1:
   experiment-2:
 model: sonnet                  # optional: one model for every other agent
-permission_mode: acceptEdits
+permission_mode: auto           # optional; this is the default
 ```
 
 Call the file `oratorio.yaml`, or `<anything>.oratorio.yaml` to keep
@@ -91,9 +92,14 @@ More options for `up`: `--only manager,reviewer`, `--model haiku`,
 files instead of the current folder).
 
 - `permission_mode` is how much the agents may do without asking you
-  (Claude Code's own modes). The default, `acceptEdits`, lets them edit
-  files freely but still ask before running most commands, so expect to
-  approve things in their tiles.
+  (Claude Code's own modes). The default, `auto`, lets an agent go ahead
+  with what it judges safe and stop to ask only for the rest, so the team
+  is not left waiting while you are away. For a tighter rein use
+  `acceptEdits` (edits files freely, asks before most commands).
+- Agents do not load your personal Claude Code plugins, hooks or MCP
+  servers. They do take over your auto mode settings from
+  `~/.claude/settings.json`, and a role marked `status_line: true`
+  (`manager`, as shipped) also shows your status line.
 - The first time agents start in a new folder, each tile asks whether you
   trust that folder.
 - The listeners run in a second tmux window (`Ctrl-b n` to see it).
@@ -103,7 +109,7 @@ files instead of the current folder).
 ### Roles
 
 Each file in `orchestration/roles/` is one role: a few settings on top
-(`model`, `topics`, ...) and a plain-language brief below. `multiple:
+(`model`, `topics`, `status_line`, ...) and a plain-language brief below. `multiple:
 true` lets a role run as several numbered agents; `{agent_id}` in the
 brief is replaced with each agent's own id.
 

@@ -3,6 +3,7 @@ agent_id: manager
 topics: [results, general]
 model: fable
 is_auditor: true
+status_line: true
 ---
 # Manager
 

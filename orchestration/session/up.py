@@ -7,6 +7,7 @@ board messages into its pane whenever it is idle.
     oratorio up [-w NAME] [--only a,b] [--model M]    start a workspace
     oratorio add <agent> [-w NAME]                     add one while running
     oratorio remove <agent> [-w NAME]                  close one
+    oratorio restart <agent>|--all [-w NAME]           start it afresh, where it is
     oratorio tile [agent ...] [-w NAME]                arrange the tiles
     oratorio save [-w NAME]                            write its yaml file
     oratorio attach [-w NAME]                          open its tiles
@@ -33,7 +34,7 @@ A workspace can be described in a yaml file, in any folder:
       experiment-1:
       experiment-2:
     model: sonnet                # optional: one model for every agent
-    permission_mode: acceptEdits
+    permission_mode: auto        # optional; this is the default
 
 (`agents: [manager, experiment-1]` also works when no agent needs a
 setting of its own.)
@@ -139,7 +140,9 @@ def pick_running_workspace(args) -> None:
     if len(running) == 1:
         return use_workspace(running[0])
     sys.exit(f"Several workspaces are running ({', '.join(running)}). Say which one with -w NAME.")
-DEFAULT_PERMISSION_MODE = "acceptEdits"
+# Claude Code's auto mode: the agent goes ahead with what it judges safe and
+# stops to ask only for the rest, so a team is not left waiting on approvals.
+DEFAULT_PERMISSION_MODE = "auto"
 MCP_SERVER_NAME = "orchestration-board"
 
 PROTOCOL = """\
@@ -318,6 +321,32 @@ def write_private(path: Path, text: str) -> None:
     path.chmod(0o600)
 
 
+# The user's own Claude Code settings an agent takes over. Agents skip the
+# rest of the user's setup (plugins, hooks, MCP servers -- see the launch
+# command below), but these only change what the user sees and is asked:
+# how auto mode behaves for them and, for a role marked `status_line:
+# true`, their status line. (A status line takes rows from a small tile,
+# and its account-wide parts read the same on every agent, so it is not
+# on everywhere.)
+CARRIED_SETTINGS = ("skipAutoPermissionPrompt", "autoMode")
+
+
+def carried_settings(status_line: bool = False, settings_file: Path | None = None) -> dict:
+    """The CARRIED_SETTINGS found in the user's Claude Code settings file,
+    with their status line too if `status_line`."""
+    if settings_file is None:
+        home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        settings_file = home / "settings.json"
+    try:
+        mine = json.loads(settings_file.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(mine, dict):
+        return {}
+    wanted = CARRIED_SETTINGS + (("statusLine",) if status_line else ())
+    return {key: mine[key] for key in wanted if key in mine}
+
+
 def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict) -> tuple[str, Path]:
     """Write this agent's per-run files; return (shell command for its
     pane, its idle-flag path)."""
@@ -338,7 +367,7 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
     flag = shlex.quote(str(idle_flag))
     hook = lambda command: {"hooks": [{"type": "command", "command": command}]}  # noqa: E731
     settings = RUN_DIR / f"{agent_id}.settings.json"
-    write_private(settings, json.dumps({"hooks": {
+    write_private(settings, json.dumps({**carried_settings(bool(meta.get("status_line"))), "hooks": {
         "SessionStart": [hook(f"touch {flag}"),
                          {"matcher": "clear", **hook(f"touch {flag}.cleared")}],
         "UserPromptSubmit": [hook(f"rm -f {flag}")],
@@ -438,6 +467,33 @@ def close_views(agent_id: str | None = None) -> None:
             subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
 
 
+# What a tile shows along its top edge: its label if it has one, else its title.
+BORDER_FORMAT = " #{?#{@label},#[bold]#{@label}#[default],#{pane_title}} "
+
+
+def agent_label(agent_id: str) -> str:
+    """How an agent is named on screen: its name and the model it runs on,
+    `manager (fable)`."""
+    model = running_agents().get(agent_id, {}).get("ORCH_MODEL")
+    if not model:  # started before the model was written down: what it would get now
+        try:
+            path = role_files()[resolve_agent(agent_id, role_files(), set())[1]]
+            model = model_for(agent_id, parse_role_file(path)[0].get("model"), load_state())
+        except ValueError:
+            return agent_id
+    return f"{agent_id} ({model})"
+
+
+def label_pane(pane: str, label: str) -> None:
+    tmux("set-option", "-p", "-t", pane, "@label", label)
+
+
+def views_open() -> bool:
+    """Is anything of this workspace being shown with `oratorio open`?"""
+    return any(name.startswith(view_session(""))
+               for name in tmux("list-sessions", "-F", "#{session_name}").split())
+
+
 def retile() -> None:
     if window_exists("agents"):
         panes = tmux("list-panes", "-t", f"{SESSION}:agents", "-F", "#{pane_id}").split()
@@ -457,31 +513,46 @@ def retile() -> None:
             tmux("select-layout", "-t", f"{SESSION}:{window}", "tiled")
 
 
-def start_agent(conn, agent_id: str, path: Path, state: dict) -> None:
+def start_agent(conn, agent_id: str, path: Path, state: dict, replace: dict | None = None) -> None:
     """Everything for one agent: board row + fresh token, its session
     pane, and its listener pane. Creates the tmux session/windows if this
-    is the first one."""
+    is the first one.
+
+    With `replace` (the running agent's own record, for a restart): the
+    new session and listener take the place of the old ones in the same
+    panes, so the agent stays where it is on screen."""
     meta, brief, token = sync_agent(conn, agent_id, path)
     conn.commit()
     command, idle_flag = agent_command(agent_id, meta, brief, token, state)
     workdir = state["workdir"]
 
-    if not session_exists():
+    if replace:
+        pane = replace["ORCH_TMUX_PANE"]
+        tmux("respawn-pane", "-k", "-t", pane, "-c", workdir, command)
+    elif not session_exists():
         pane = tmux("new-session", "-d", "-s", SESSION, "-n", "agents", "-x", "250", "-y", "60",
                     "-c", workdir, "-P", "-F", "#{pane_id}", command)
         tmux("set-option", "-t", SESSION, "pane-border-status", "top")
-        tmux("set-option", "-t", SESSION, "pane-border-format", " #{pane_title} ")
+        tmux("set-option", "-t", SESSION, "pane-border-format", BORDER_FORMAT)
         tmux("set-option", "-t", SESSION, "mouse", "on")  # click a tile to type in it
-    elif not window_exists("agents"):  # every tile has been opened in a terminal of its own
+        pass_modified_keys()
+    elif views_open():  # agents are shown in terminals of their own: no tile, a window to `open`
+        pane = tmux("new-window", "-d", "-t", f"{SESSION}:", "-n", agent_id, "-c", workdir,
+                    "-P", "-F", "#{pane_id}", command)
+        own_window(agent_id, pane)
+    elif not window_exists("agents"):
         pane = tmux("new-window", "-d", "-t", f"{SESSION}:", "-n", "agents", "-c", workdir,
                     "-P", "-F", "#{pane_id}", command)
     else:
         pane = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", workdir,
                     "-P", "-F", "#{pane_id}", command)
     tmux("select-pane", "-t", pane, "-T", agent_id)
+    model = model_for(agent_id, meta.get("model"), state)
+    label_pane(pane, f"{agent_id} ({model})")
     retile()
 
     env = {
+        "ORCH_MODEL": model,
         "ORCH_BOARD_DSN": os.environ["ORCH_BOARD_DSN"],
         "ORCH_AGENT_TOKEN": token,
         "ORCH_RUNNER": "claude",
@@ -492,8 +563,12 @@ def start_agent(conn, agent_id: str, path: Path, state: dict) -> None:
     write_private(env_file, "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()))
     listener = (f"set -a; . {shlex.quote(str(env_file))}; set +a; "
                 f"exec {shlex.quote(sys.executable)} -m orchestration.listener.listen")
+    live = tmux("list-panes", "-s", "-t", SESSION, "-F", "#{pane_id}").split()
     # The listeners live in a second window (plain code; they only show log lines).
-    if not window_exists("listeners"):
+    if replace and replace.get("ORCH_LISTENER_PANE") in live:
+        listener_pane = replace["ORCH_LISTENER_PANE"]  # the old one's token no longer works
+        tmux("respawn-pane", "-k", "-t", listener_pane, "-c", str(REPO), listener)
+    elif not window_exists("listeners"):
         listener_pane = tmux("new-window", "-d", "-t", SESSION, "-n", "listeners", "-c", str(REPO),
                              "-P", "-F", "#{pane_id}", listener)
     else:
@@ -502,6 +577,28 @@ def start_agent(conn, agent_id: str, path: Path, state: dict) -> None:
     tmux("select-pane", "-t", listener_pane, "-T", f"listener: {agent_id}")
     with env_file.open("a") as f:
         f.write(f"ORCH_LISTENER_PANE={shlex.quote(listener_pane)}\n")
+    retile()
+
+
+def pass_modified_keys() -> None:
+    """Let Shift+Return and the like reach the agents as themselves. Left
+    alone, tmux hands Shift+Return on as a plain Return, which sends the
+    message instead of starting a new line."""
+    tmux("set-option", "-s", "extended-keys", "on")
+    if "extkeys" not in tmux("show-options", "-s", "terminal-features"):
+        # Ask the terminal outside tmux (iTerm2, ...) to report those keys too.
+        tmux("set-option", "-as", "terminal-features", "xterm*:extkeys")
+
+
+def start_board() -> None:
+    """Start the board view as a tile (or, with no tiles left, in a window
+    of its own)."""
+    where = (["split-window", "-d", "-t", f"{SESSION}:agents"] if window_exists("agents")
+             else ["new-window", "-d", "-t", f"{SESSION}:", "-n", "agents"])
+    board = tmux(*where, "-c", str(REPO), "-P", "-F", "#{pane_id}",
+                 f"{shlex.quote(sys.executable)} -m orchestration.watch.board -w {shlex.quote(WORKSPACE)}")
+    tmux("select-pane", "-t", board, "-T", f"BOARD: {WORKSPACE}")
+    label_pane(board, "board")
     retile()
 
 
@@ -583,11 +680,7 @@ def cmd_up(args) -> None:
             start_agent(conn, agent_id, roles[role], state)
     db.close_pool()
 
-    board = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", str(REPO), "-P", "-F",
-                 "#{pane_id}",
-                 f"{shlex.quote(sys.executable)} -m orchestration.watch.board -w {shlex.quote(name)}")
-    tmux("select-pane", "-t", board, "-T", f"BOARD: {name}")
-    retile()
+    start_board()
 
     source = f" from {file.name}" if file and not args.only else ""
     print(f"Started workspace '{name}'{source}: {', '.join(wanted)}")
@@ -616,6 +709,46 @@ def cmd_add(args) -> None:
         start_agent(conn, agent_id, roles[role], state)
     db.close_pool()
     print(f"Added {agent_id} to '{WORKSPACE}'.")
+    if args.here:
+        pane = running_agents()[agent_id]["ORCH_TMUX_PANE"]
+        was_tiled = int(tmux("display-message", "-p", "-t", pane, "#{window_panes}")) > 1
+        own_window(agent_id, pane)
+        if was_tiled:
+            retile()
+        me = shlex.quote(str(REPO / "bin" / "oratorio"))
+        session_id = os.environ.get("ITERM_SESSION_ID", "").rpartition(":")[2]
+        script = iterm_script([f"{me} open {shlex.quote(agent_id)} -w {shlex.quote(WORKSPACE)}"],
+                              "here", session_id=session_id)
+        done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if done.returncode != 0:
+            sys.exit(f"Could not drive iTerm2 ({done.stderr.strip()}). Make a split yourself and run: "
+                     f"oratorio open {agent_id}")
+    elif views_open():
+        print(f"To see it, make a split or tab and run:  oratorio open {agent_id}")
+
+
+def cmd_restart(args) -> None:
+    pick_running_workspace(args)
+    running = running_agents()
+    if bool(args.agent) == args.all:
+        sys.exit("Say which agent to restart, or --all (not both).")
+    names = list(running) if args.all else [args.agent]
+    if not running or names[0] not in running:
+        sys.exit(f"'{names[0] if names else args.agent}' is not running in '{WORKSPACE}'. "
+                 f"Running: {', '.join(running) or 'nothing'}")
+    roles = role_files()
+    state = load_state()
+    if args.model:  # kept, so `save` writes it down
+        state = {**state, "models": {**(state.get("models") or {}), **{name: args.model for name in names}}}
+        STATE_FILE.write_text(json.dumps(state, indent=2))
+    pool = connect()
+    with pool.connection() as conn:
+        for name in names:
+            role = resolve_agent(name, roles, set())[1]
+            start_agent(conn, name, roles[role], state, replace=running[name])
+            print(f"Restarted {agent_label(name)}.")
+    db.close_pool()
+    print("Each starts with an empty conversation. Messages it had not finished are handed to it again.")
 
 
 def cmd_remove(args) -> None:
@@ -697,7 +830,7 @@ def cmd_tile(args) -> None:
     for name, pane in openable().items():
         if not window_exists("agents"):
             tmux("rename-window", "-t", pane, "agents")
-            tmux("set-window-option", "-t", pane, "pane-border-format", " #{pane_title} ")
+            tmux("set-window-option", "-t", pane, "pane-border-format", BORDER_FORMAT)
         elif tmux("display-message", "-p", "-t", pane, "#{window_name}") != "agents":
             tmux("join-pane", "-d", "-s", pane, "-t", f"{SESSION}:agents")
             tmux("select-layout", "-t", f"{SESSION}:agents", "tiled")  # make room for the next one
@@ -754,7 +887,8 @@ def own_window(name: str, pane: str) -> str:
     tmux("set-window-option", "-t", window, "window-size", "smallest")
     # Its name along the top edge, so it is clear who is in which terminal.
     tmux("set-window-option", "-t", window, "pane-border-status", "top")
-    tmux("set-window-option", "-t", window, "pane-border-format", f" #[bold]{name}#[default] ")
+    label_pane(pane, name if name == "board" else agent_label(name))
+    tmux("set-window-option", "-t", window, "pane-border-format", BORDER_FORMAT)
     return window
 
 
@@ -823,13 +957,18 @@ def iterm_script(commands: list[str], where: str = "window", bounds: str | None 
 
 def open_all_in_iterm(panes: dict[str, str], where: str = "window") -> None:
     agents = [a for a in panes if a != "board"]
-    order = tile_order(agents, role_files(), len(panes), load_state().get("tiles"))
+    tiles = len(panes) + (where != "here")  # the console is a tile too
+    order = tile_order(agents, role_files(), tiles, load_state().get("tiles"))
     order += ["board"] if "board" in panes else []
     for name in order:  # one at a time, here -- the terminals below then only have to look
         own_window(name, panes[name])
     retile()
     me = shlex.quote(str(REPO / "bin" / "oratorio"))
     commands = [f"{me} open {shlex.quote(name)} -w {shlex.quote(WORKSPACE)}" for name in order]
+    if where != "here":  # there, the terminal the command was typed in is the console
+        # A plain shell in the working folder, for `oratorio add ... --here` and the like.
+        commands.append(f"cd {shlex.quote(load_state()['workdir'])} && clear")
+        order.append("console")
     # iTerm2 names each split in ITERM_SESSION_ID, as "w0t0p0:<id>".
     session_id = os.environ.get("ITERM_SESSION_ID", "").rpartition(":")[2]
     script = iterm_script(commands, where, screen_bounds() if where == "window" else None, session_id)
@@ -849,6 +988,9 @@ def cmd_open(args) -> None:
     if not session_exists():
         sys.exit(f"Workspace '{WORKSPACE}' is not running.")
     panes = openable()
+    if "board" not in panes:  # it was closed, or stopped: bring it back
+        start_board()
+        panes = openable()
     if args.tab and args.here:
         sys.exit("Use --tab or --here, not both.")
     if args.all:
@@ -871,12 +1013,15 @@ def cmd_open(args) -> None:
         retile()
     view = view_session(args.agent)
     close_views(args.agent)  # one terminal per agent; a second `open` takes it over
+    pass_modified_keys()  # before this terminal attaches: it is asked for them as it does
     os.execvp("tmux", ["tmux", "new-session", "-t", SESSION, "-s", view, ";",
                        "set-option", "-t", view, "destroy-unattached", "on", ";",
                        "set-option", "-t", view, "status", "off", ";",
+                       "set-option", "-t", view, "mouse", "on", ";",  # the wheel scrolls back, as in the tiles
                        # The terminal's own title (tab, or iTerm2's bar over each split).
                        "set-option", "-t", view, "set-titles", "on", ";",
-                       "set-option", "-t", view, "set-titles-string", f"{args.agent} - {WORKSPACE}", ";",
+                       "set-option", "-t", view, "set-titles-string",
+                       f"{args.agent if args.agent == 'board' else agent_label(args.agent)} - {WORKSPACE}", ";",
                        "select-window", "-t", f"{view}:{window}"])
 
 
@@ -927,7 +1072,18 @@ def main() -> None:
     p.add_argument("agent", help="a role (experiment -> next free experiment-N) or an exact agent name")
     p.add_argument("--model", help="model for this agent only (default: what the workspace "
                                    "or its role says)")
+    p.add_argument("--here", action="store_true",
+                   help="iTerm2 only: also show it in a new split under the terminal you type this in")
     p.set_defaults(run=cmd_add)
+
+    p = sub.add_parser("restart", parents=[which], help="start an agent afresh, where it is",
+                       description="Stop an agent and start it again in the same tile or terminal, with an "
+                                   "empty conversation and the current role file, model and settings. "
+                                   "Messages it had not finished are handed to it again.")
+    p.add_argument("agent", nargs="?")
+    p.add_argument("--all", action="store_true", help="restart every agent in the workspace")
+    p.add_argument("--model", help="also change its model")
+    p.set_defaults(run=cmd_restart)
 
     p = sub.add_parser("remove", parents=[which], help="close one agent")
     p.add_argument("agent")

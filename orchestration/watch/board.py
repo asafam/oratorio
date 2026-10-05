@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from orchestration.board_core import registry  # noqa: E402
 
 POLL_SECONDS = 1
+RETRY_SECONDS = 5  # between attempts while the board cannot be reached
 CONTENT_WIDTH = 100
 
 _COLOR = sys.stdout.isatty()
@@ -217,9 +218,21 @@ def main() -> None:
     if not dsn:
         print("ORCH_BOARD_DSN is not set.", file=sys.stderr)
         sys.exit(1)
+    history = args.history
     try:
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            watch(conn, history=args.history, once=args.once, workspace=args.workspace)
+        while True:
+            try:
+                with psycopg.connect(dsn, autocommit=True) as conn:
+                    watch(conn, history=history, once=args.once, workspace=args.workspace)
+                return
+            except psycopg.OperationalError as e:
+                if args.once:
+                    raise
+                # The board is unreachable (a dropped tunnel, usually). Stay up and keep trying.
+                reason = (str(e).strip().splitlines() or ["no reason given"])[0]
+                print(f"-- cannot reach the board ({reason}); trying again in {RETRY_SECONDS}s", flush=True)
+                time.sleep(RETRY_SECONDS)
+                history = 0  # what came before the gap is already on screen
     except KeyboardInterrupt:
         pass
 
