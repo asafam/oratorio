@@ -1,6 +1,5 @@
 ---
 agent_id: documenter
-peers: [manager, todo, experiment-1, experiment-2]
 topics: [results, general]
 model: sonnet
 ---

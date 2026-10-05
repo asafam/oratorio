@@ -113,9 +113,11 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
 
     @mcp.tool()
     def list_agents(active_only: bool = True) -> dict[str, Any]:
-        """Who is registered, what each one is (runner), and whether it is
-        online right now. An offline agent still receives messages -- they
-        wait in its inbox until it is back."""
+        """Who is on the board: each agent's id, its role, and whether it
+        is online right now. The team changes while you work (agents are
+        added and removed), so check here rather than assuming. An offline
+        agent still receives messages -- they wait in its inbox until it
+        is back. Use get_role(agent_id) for what a role does."""
         with db.get_pool().connection() as conn:
             return {"agents": registry.list_agents(conn, active_only=active_only)}
 

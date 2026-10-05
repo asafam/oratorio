@@ -1,29 +1,50 @@
 #!/usr/bin/env python3
-"""Start the whole team in one tiled tmux window: one pane per agent, plus
+"""Run the agent team in one tiled tmux window: one pane per agent, plus
 the board view. Each agent is an ordinary interactive Claude Code session
 you can watch and type in; a listener per agent (second tmux window) types
 board messages into its pane whenever it is idle.
 
-    python -m orchestration.session.up [--workdir DIR] [--only a,b] [--model M]
-    tmux attach -t oratorio
-    python -m orchestration.session.up --down
+    oratorio up [--workdir DIR] [--only a,b] [--model M]   start the team
+    oratorio add <agent>                                    add one while running
+    oratorio remove <agent>                                 close one
+    oratorio save                                           write oratorio.yaml
+    oratorio status
+    oratorio down
 
-Agents come from orchestration/roles/*.md. On every start each agent gets
-a fresh token (the previous one stops working), so nothing secret needs
-to be kept between runs; the per-run files live in .oratorio/ (gitignored).
+(`oratorio` is bin/oratorio; or run this file with the venv's python.)
 
-Nothing here spends tokens on its own: sessions start idle and only work
-when a message, or you, gives them something to do.
+A workspace is a research folder with an `oratorio.yaml` in it:
+
+    agents: [manager, todo, experiment-1, experiment-2]
+    model: sonnet                # optional: one model for every agent
+    permission_mode: acceptEdits
+
+`up` in that folder starts exactly those agents; `save` writes the file
+from whatever is running now.
+
+Agents come from the role files in orchestration/roles/*.md. A role
+marked `multiple: true` can run as several numbered agents: `add
+experiment` starts `experiment-1`, again gives `experiment-2`, and so on.
+
+Each agent gets a fresh token when it starts (its previous one stops
+working), so nothing secret is kept between runs; per-run files live in
+.oratorio/ (gitignored). Nothing here spends tokens on its own: sessions
+start idle and only work when a message, or you, gives them something.
+
+One workspace runs at a time -- all agents share one board.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -33,13 +54,17 @@ from orchestration.roles.sync_roles import ROLES_DIR, git_blob_sha, parse_role_f
 
 SESSION = "oratorio"
 RUN_DIR = REPO / ".oratorio"
+STATE_FILE = RUN_DIR / "state.json"
+WORKSPACE_FILE = "oratorio.yaml"
+DEFAULT_PERMISSION_MODE = "acceptEdits"
 MCP_SERVER_NAME = "orchestration-board"
 
 PROTOCOL = """\
 # You are `{agent_id}`, one agent in a team that works through a shared message board
 
-Your teammates: {peers}. You never talk to them directly -- only through
-the board tools (`{mcp}`), and they answer the same way.
+You never talk to the other agents directly -- only through the board
+tools (`{mcp}`), and they answer the same way. The team changes while you
+work: call `list_agents` to see who is on it right now.
 
 ## How messages reach you
 
@@ -69,8 +94,8 @@ the board tools (`{mcp}`), and they answer the same way.
 - Give related messages the same `thread_id`; replies inherit it.
 - After posting, finish your turn. Do NOT wait, sleep or poll for the
   answer -- it is typed in here when it arrives.
-- `list_agents` shows who is online. `read_messages` shows what is still
-  open for you -- check it if your context was cleared or compacted.
+- `read_messages` shows what is still open for you -- check it if your
+  context was cleared or compacted.
 
 ## Keep your context small
 
@@ -102,10 +127,42 @@ def session_exists() -> bool:
     return subprocess.run(["tmux", "has-session", "-t", SESSION], capture_output=True).returncode == 0
 
 
-def sync_agent(conn, path: Path) -> tuple[dict, str, str]:
-    """Load one role file into the board and give it a fresh token.
-    Returns (frontmatter, brief, token)."""
+def role_files() -> dict[str, Path]:
+    """role name -> its role file, in file-name order."""
+    return {parse_role_file(p)[0]["agent_id"]: p for p in sorted(ROLES_DIR.glob("*.md"))}
+
+
+def is_multiple(path: Path) -> bool:
+    return bool(parse_role_file(path)[0].get("multiple", False))
+
+
+def resolve_agent(name: str, roles: dict[str, Path], taken: set[str]) -> tuple[str, str]:
+    """Turn what the user typed into (agent_id, role).
+
+    A normal role is its own single agent (`manager`). A role marked
+    `multiple: true` runs as numbered agents: naming the role
+    (`experiment`) picks the lowest number not in `taken`
+    (`experiment-1`, then `experiment-2`, ...); naming a numbered agent
+    (`experiment-3`) means exactly that one. Raises ValueError otherwise.
+    """
+    if name in roles:
+        if not is_multiple(roles[name]):
+            return name, name
+        n = 1
+        while f"{name}-{n}" in taken:
+            n += 1
+        return f"{name}-{n}", name
+    numbered = re.fullmatch(r"(.+)-(\d+)", name)
+    if numbered and numbered.group(1) in roles and is_multiple(roles[numbered.group(1)]):
+        return name, numbered.group(1)
+    raise ValueError(f"No role for '{name}'. Roles: {', '.join(roles)}")
+
+
+def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
+    """Load one role file into the board as `agent_id` and give it a fresh
+    token. Returns (frontmatter, brief, token)."""
     meta, brief = parse_role_file(path)
+    brief = brief.replace("{agent_id}", agent_id)
     topics = meta.get("topics", [])
     for topic in topics:  # a role may name a topic nobody has seeded yet
         conn.execute(
@@ -114,16 +171,16 @@ def sync_agent(conn, path: Path) -> tuple[dict, str, str]:
     token = auth.generate_token()
     registry.upsert_agent(
         conn,
-        agent_id=meta["agent_id"],
+        agent_id=agent_id,
         role_doc_path=str(path.relative_to(REPO)),
         role_version=git_blob_sha(path),
         brief=brief,
-        peers=meta.get("peers", []),
+        peers=[],
         topics=topics,
         auth_token_hash=auth.hash_token(token),
         is_auditor=bool(meta.get("is_auditor", False)),
     )
-    registry.set_auth_token_hash(conn, meta["agent_id"], auth.hash_token(token))
+    registry.set_auth_token_hash(conn, agent_id, auth.hash_token(token))
     return meta, brief, token
 
 
@@ -132,7 +189,7 @@ def write_private(path: Path, text: str) -> None:
     path.chmod(0o600)
 
 
-def agent_command(agent_id: str, meta: dict, brief: str, token: str, args) -> tuple[str, Path]:
+def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict) -> tuple[str, Path]:
     """Write this agent's per-run files; return (shell command for its
     pane, its idle-flag path)."""
     idle_flag = RUN_DIR / f"{agent_id}.idle"
@@ -161,111 +218,253 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, args) -> tu
 
     prompt = RUN_DIR / f"{agent_id}.prompt.md"
     prompt.write_text(
-        PROTOCOL.format(agent_id=agent_id, peers=", ".join(meta.get("peers", [])) or "none",
-                        mcp=MCP_SERVER_NAME) + brief + "\n"
+        PROTOCOL.format(agent_id=agent_id, mcp=MCP_SERVER_NAME) + brief + "\n"
     )
 
     command = [
         "claude", "-n", agent_id,
-        "--model", args.model or meta.get("model", "sonnet"),
+        "--model", state.get("model") or meta.get("model", "sonnet"),
         # Skip user-level plugins/hooks/MCP servers: an agent needs the
         # board and its role, not everything installed on this machine.
         "--setting-sources", "project",
         "--strict-mcp-config", "--mcp-config", str(mcp_config),
         "--settings", str(settings),
         "--append-system-prompt-file", str(prompt),
-        "--permission-mode", args.permission_mode,
+        "--permission-mode", state["permission_mode"],
         "--allowedTools", f"mcp__{MCP_SERVER_NAME}",
     ]
     return shlex.join(command), idle_flag
 
 
-def listener_command(agent_id: str, token: str, pane: str, idle_flag: Path) -> str:
-    env_file = RUN_DIR / f"{agent_id}.env"
-    write_private(env_file, "".join(f"{k}={shlex.quote(v)}\n" for k, v in {
+# ---------------------------------------------------------------------
+# What is running. The per-agent .env file is the record (pane titles
+# can't be: Claude Code rewrites them) -- an agent counts as running
+# while the pane named there still exists.
+# ---------------------------------------------------------------------
+def _read_env(path: Path) -> dict[str, str]:
+    return dict(
+        (k, shlex.split(v)[0] if v else "")
+        for k, v in (line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+    )
+
+
+def running_agents() -> dict[str, dict[str, str]]:
+    """agent_id -> its env record, for agents whose pane is still alive."""
+    if not RUN_DIR.exists() or not session_exists():
+        return {}
+    live = set(tmux("list-panes", "-s", "-t", SESSION, "-F", "#{pane_id}").split())
+    found = {}
+    for env_file in sorted(RUN_DIR.glob("*.env")):
+        env = _read_env(env_file)
+        if env.get("ORCH_TMUX_PANE") in live:
+            found[env_file.stem] = env
+    return found
+
+
+def load_state() -> dict:
+    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+
+
+def forget_agent(agent_id: str) -> None:
+    for f in RUN_DIR.glob(f"{agent_id}.*"):
+        f.unlink()
+
+
+def window_exists(name: str) -> bool:
+    return name in tmux("list-windows", "-t", SESSION, "-F", "#{window_name}").split()
+
+
+def retile() -> None:
+    for window in ("agents", "listeners"):
+        if window_exists(window):
+            tmux("select-layout", "-t", f"{SESSION}:{window}", "tiled")
+
+
+def start_agent(conn, agent_id: str, path: Path, state: dict) -> None:
+    """Everything for one agent: board row + fresh token, its session
+    pane, and its listener pane. Creates the tmux session/windows if this
+    is the first one."""
+    meta, brief, token = sync_agent(conn, agent_id, path)
+    conn.commit()
+    command, idle_flag = agent_command(agent_id, meta, brief, token, state)
+    workdir = state["workdir"]
+
+    if not session_exists():
+        pane = tmux("new-session", "-d", "-s", SESSION, "-n", "agents", "-x", "250", "-y", "60",
+                    "-c", workdir, "-P", "-F", "#{pane_id}", command)
+        tmux("set-option", "-t", SESSION, "pane-border-status", "top")
+        tmux("set-option", "-t", SESSION, "pane-border-format", " #{pane_title} ")
+        tmux("set-option", "-t", SESSION, "mouse", "on")  # click a tile to type in it
+    else:
+        pane = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", workdir,
+                    "-P", "-F", "#{pane_id}", command)
+    tmux("select-pane", "-t", pane, "-T", agent_id)
+    retile()
+
+    env = {
         "ORCH_BOARD_DSN": os.environ["ORCH_BOARD_DSN"],
         "ORCH_AGENT_TOKEN": token,
         "ORCH_RUNNER": "claude",
         "ORCH_TMUX_PANE": pane,
         "ORCH_IDLE_FLAG": str(idle_flag),
-    }.items()))
-    return (f"set -a; . {shlex.quote(str(env_file))}; set +a; "
-            f"exec {shlex.quote(sys.executable)} -m orchestration.listener.listen")
+    }
+    env_file = RUN_DIR / f"{agent_id}.env"
+    write_private(env_file, "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()))
+    listener = (f"set -a; . {shlex.quote(str(env_file))}; set +a; "
+                f"exec {shlex.quote(sys.executable)} -m orchestration.listener.listen")
+    # The listeners live in a second window (plain code; they only show log lines).
+    if not window_exists("listeners"):
+        listener_pane = tmux("new-window", "-d", "-t", SESSION, "-n", "listeners", "-c", str(REPO),
+                             "-P", "-F", "#{pane_id}", listener)
+    else:
+        listener_pane = tmux("split-window", "-d", "-t", f"{SESSION}:listeners", "-c", str(REPO),
+                             "-P", "-F", "#{pane_id}", listener)
+    tmux("select-pane", "-t", listener_pane, "-T", f"listener: {agent_id}")
+    with env_file.open("a") as f:
+        f.write(f"ORCH_LISTENER_PANE={shlex.quote(listener_pane)}\n")
+    retile()
 
 
-def up(args) -> None:
-    if session_exists():
-        sys.exit(f"tmux session '{SESSION}' is already running. Attach with "
-                 f"`tmux attach -t {SESSION}`, or stop it with --down first.")
+def connect():
     if not os.environ.get("ORCH_BOARD_DSN"):
         sys.exit("ORCH_BOARD_DSN is not set (put it in .env, or export it).")
-
-    role_files = sorted(ROLES_DIR.glob("*.md"))
-    only = set(args.only.split(",")) if args.only else None
-    workdir = str(Path(args.workdir).resolve())
-    RUN_DIR.mkdir(exist_ok=True)
-    RUN_DIR.chmod(0o700)
-
     try:
         pool = db.get_pool()
         pool.wait(timeout=10)
+        return pool
     except Exception as e:
         sys.exit(f"Cannot reach the board database ({e}). Is the tunnel up? "
                  "See orchestration/ops/scripts/board_tunnel.sh")
 
-    agents = []  # (agent_id, pane command, idle flag, token)
+
+def cmd_up(args) -> None:
+    if session_exists():
+        sys.exit(f"Already running. Attach with `tmux attach -t {SESSION}`, add agents with "
+                 "`add`, or stop with `down`.")
+    workdir = Path(args.workdir).resolve()
+    workspace_file = workdir / WORKSPACE_FILE
+    workspace = (yaml.safe_load(workspace_file.read_text()) or {}) if workspace_file.exists() else {}
+
+    roles = role_files()
+    # Command line wins over the workspace file, which wins over "every role".
+    names = args.only.split(",") if args.only else workspace.get("agents") or list(roles)
+    wanted: dict[str, str] = {}  # agent_id -> role
+    for name in names:
+        try:
+            agent_id, role = resolve_agent(name, roles, set(wanted))
+        except ValueError as e:
+            sys.exit(str(e))
+        wanted[agent_id] = role
+
+    state = {
+        "workdir": str(workdir),
+        "model": args.model or workspace.get("model"),
+        "permission_mode": args.permission_mode or workspace.get("permission_mode")
+                           or DEFAULT_PERMISSION_MODE,
+    }
+    pool = connect()
+    RUN_DIR.mkdir(exist_ok=True)
+    RUN_DIR.chmod(0o700)
+    for stale in RUN_DIR.iterdir():  # left over from a run that was not shut down cleanly
+        stale.unlink()
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
     with pool.connection() as conn:
-        for path in role_files:
-            meta, brief, token = sync_agent(conn, path)
-            if only and meta["agent_id"] not in only:
-                continue
-            command, idle_flag = agent_command(meta["agent_id"], meta, brief, token, args)
-            agents.append((meta["agent_id"], command, idle_flag, token))
-        conn.commit()
+        for agent_id, role in wanted.items():
+            start_agent(conn, agent_id, roles[role], state)
     db.close_pool()
-    if not agents:
-        sys.exit("No agents to start.")
 
-    # Window 1: one tile per agent, plus the board view.
-    panes: dict[str, str] = {}
-    for i, (agent_id, command, _, _) in enumerate(agents):
-        if i == 0:
-            pane = tmux("new-session", "-d", "-s", SESSION, "-n", "agents", "-x", "250", "-y", "60",
-                        "-c", workdir, "-P", "-F", "#{pane_id}", command)
-        else:
-            pane = tmux("split-window", "-t", f"{SESSION}:agents", "-c", workdir,
-                        "-P", "-F", "#{pane_id}", command)
-            tmux("select-layout", "-t", f"{SESSION}:agents", "tiled")
-        tmux("select-pane", "-t", pane, "-T", agent_id)
-        panes[agent_id] = pane
-    board = tmux("split-window", "-t", f"{SESSION}:agents", "-c", str(REPO), "-P", "-F", "#{pane_id}",
-                 f"{shlex.quote(sys.executable)} -m orchestration.watch.board")
+    board = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", str(REPO), "-P", "-F",
+                 "#{pane_id}", f"{shlex.quote(sys.executable)} -m orchestration.watch.board")
     tmux("select-pane", "-t", board, "-T", "BOARD")
-    tmux("select-layout", "-t", f"{SESSION}:agents", "tiled")
-    tmux("set-option", "-t", SESSION, "pane-border-status", "top")
-    tmux("set-option", "-t", SESSION, "pane-border-format", " #{pane_title} ")
-    tmux("set-option", "-t", SESSION, "mouse", "on")  # click a tile to type in it
+    retile()
 
-    # Window 2: the listeners (plain code; they only show log lines).
-    for i, (agent_id, _, idle_flag, token) in enumerate(agents):
-        command = listener_command(agent_id, token, panes[agent_id], idle_flag)
-        if i == 0:
-            pane = tmux("new-window", "-d", "-t", SESSION, "-n", "listeners", "-c", str(REPO),
-                        "-P", "-F", "#{pane_id}", command)
-        else:
-            pane = tmux("split-window", "-d", "-t", f"{SESSION}:listeners", "-c", str(REPO),
-                        "-P", "-F", "#{pane_id}", command)
-            tmux("select-layout", "-t", f"{SESSION}:listeners", "tiled")
-        tmux("select-pane", "-t", pane, "-T", f"listener: {agent_id}")
-    tmux("select-pane", "-t", panes[agents[0][0]])
-
-    print(f"Started {len(agents)} agent(s): {', '.join(a[0] for a in agents)}")
+    source = f" (from {WORKSPACE_FILE})" if workspace and not args.only else ""
+    print(f"Started {len(wanted)} agent(s){source}: {', '.join(wanted)}")
     print(f"Working directory: {workdir}")
     print(f"Watch them:  tmux attach -t {SESSION}")
-    print("Stop them:   python -m orchestration.session.up --down")
 
 
-def down() -> None:
+def cmd_add(args) -> None:
+    if not session_exists():
+        sys.exit("Nothing is running yet. Start with `up` first.")
+    roles = role_files()
+    running = set(running_agents())
+    try:
+        agent_id, role = resolve_agent(args.agent, roles, running)
+    except ValueError as e:
+        sys.exit(str(e))
+    if agent_id in running:
+        sys.exit(f"'{agent_id}' is already running.")
+    state = load_state()
+    if args.model:
+        state = {**state, "model": args.model}
+    pool = connect()
+    with pool.connection() as conn:
+        start_agent(conn, agent_id, roles[role], state)
+    db.close_pool()
+    print(f"Added {agent_id}.")
+
+
+def cmd_remove(args) -> None:
+    record = running_agents().get(args.agent)
+    if record is None:
+        sys.exit(f"'{args.agent}' is not running.")
+    for key in ("ORCH_LISTENER_PANE", "ORCH_TMUX_PANE"):
+        if record.get(key):
+            subprocess.run(["tmux", "kill-pane", "-t", record[key]], capture_output=True)
+    forget_agent(args.agent)
+    if session_exists():
+        retile()
+    # Its board row stays: messages sent to it wait in its inbox, and it
+    # shows as offline once its heartbeat stops.
+    print(f"Removed {args.agent}. Messages sent to it will wait until it is added again.")
+
+
+def _team_order(roles: dict[str, Path]):
+    """Sort key: by role (file order), then by number -- experiment-2 before experiment-10."""
+    order = list(roles)
+
+    def key(agent_id: str) -> tuple[int, int]:
+        _, role = resolve_agent(agent_id, roles, set())
+        number = re.search(r"-(\d+)$", agent_id) if is_multiple(roles[role]) else None
+        return order.index(role), int(number.group(1)) if number else 0
+
+    return key
+
+
+def cmd_save(args) -> None:
+    agents = running_agents()
+    if not agents:
+        sys.exit("Nothing is running, so there is nothing to save.")
+    state = load_state()
+    workspace = {"agents": sorted(agents, key=_team_order(role_files()))}
+    if state.get("model"):
+        workspace["model"] = state["model"]
+    workspace["permission_mode"] = state["permission_mode"]
+    target = Path(state["workdir"]) / WORKSPACE_FILE
+    target.write_text(
+        "# Oratorio workspace: `oratorio up` in this folder starts these agents.\n"
+        + yaml.safe_dump(workspace, sort_keys=False, default_flow_style=None)
+    )
+    print(f"Saved {len(agents)} agent(s) to {target}")
+
+
+def cmd_status(args) -> None:
+    agents = running_agents()
+    if not agents:
+        print("Nothing is running.")
+        return
+    state = load_state()
+    print(f"Working directory: {state.get('workdir')}")
+    print(f"Running: {', '.join(agents)}")
+    roles = role_files()
+    addable = [r for r, path in roles.items() if is_multiple(path) or r not in agents]
+    if addable:
+        print(f"Can add: {', '.join(addable)}")
+
+
+def cmd_down(args) -> None:
     if session_exists():
         tmux("kill-session", "-t", SESSION)
         print("Stopped.")
@@ -277,20 +476,33 @@ def down() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Start the agent team in a tiled tmux window.")
-    parser.add_argument("--workdir", default=".", help="directory the agents work in (default: current)")
-    parser.add_argument("--only", help="comma-separated agent ids to start (default: all roles)")
-    parser.add_argument("--model", help="use this model for every agent (default: each role's own)")
-    parser.add_argument("--permission-mode", default="acceptEdits",
-                        help="Claude Code permission mode for the agents (default: acceptEdits)")
-    parser.add_argument("--down", action="store_true", help="stop everything")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(prog="oratorio", description="Run the agent team in a tiled tmux window.")
+    sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("up", help="start the team")
+    p.add_argument("--workdir", default=".", help="folder the agents work in (default: current)")
+    p.add_argument("--only", help=f"comma-separated agents to start (default: {WORKSPACE_FILE}, else every role)")
+    p.add_argument("--model", help="one model for every agent (default: each role's own)")
+    p.add_argument("--permission-mode",
+                   help=f"Claude Code permission mode for the agents (default: {DEFAULT_PERMISSION_MODE})")
+    p.set_defaults(run=cmd_up)
+
+    p = sub.add_parser("add", help="add one agent to the running team")
+    p.add_argument("agent", help="a role (experiment -> next free experiment-N) or an exact agent id")
+    p.add_argument("--model", help="model for this agent (default: same as the rest)")
+    p.set_defaults(run=cmd_add)
+
+    p = sub.add_parser("remove", help="close one agent")
+    p.add_argument("agent")
+    p.set_defaults(run=cmd_remove)
+
+    sub.add_parser("save", help=f"write the running team to {WORKSPACE_FILE} in the working folder").set_defaults(run=cmd_save)
+    sub.add_parser("status", help="what is running").set_defaults(run=cmd_status)
+    sub.add_parser("down", help="stop everything").set_defaults(run=cmd_down)
+
+    args = parser.parse_args()
     load_dotenv()
-    if args.down:
-        down()
-    else:
-        up(args)
+    args.run(args)
 
 
 if __name__ == "__main__":

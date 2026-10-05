@@ -7,34 +7,69 @@ terminal. Agents send each other messages through the board and keep
 their own conversation context while they work.
 
 Ships with a small research team as a starting point -- `manager`,
-`todo`, `experiment-1`, `experiment-2`, `documenter` -- and one command
-that opens them all as tiles in a single terminal window, next to a live
-view of what they are saying to each other. Adapt the role files under
-`orchestration/roles/` to your own project; nothing else in this repo is
-specific to that team.
+`todo`, `experiment` (as many as you want), `documenter` -- and one
+command that opens them as tiles in a single terminal window, next to a
+live view of what they are saying to each other. Adapt the role files
+under `orchestration/roles/` to your own project; nothing else in this
+repo is specific to that team.
 
 ## Quick start
 
 ```bash
-orchestration/ops/scripts/board_tunnel.sh up        # only if the board is remote
-python -m orchestration.session.up --workdir ~/my-research
+orchestration/ops/scripts/board_tunnel.sh up     # only if the board is remote
+cd ~/my-research
+oratorio up                                      # bin/oratorio in this repo
 tmux attach -t oratorio
 ```
 
-You get one tile per agent plus a `BOARD` tile. Click a tile to type in
-it. Give your goal to `manager`; it hands work to the others through the
-board. Stop everything with `python -m orchestration.session.up --down`.
+You get one tile per agent plus a `BOARD` tile, laid out in a grid for
+you. Click a tile to type in it. Give your goal to `manager`; it hands
+work to the others through the board.
 
-- `--only manager,todo` starts just those agents.
-- `--model haiku` uses one model for all of them (each role file names
-  its own otherwise).
-- `--permission-mode` sets how much the agents may do without asking you
-  (Claude Code's own modes; default `acceptEdits` -- they edit files
-  freely but still ask before running most commands, so expect to
-  approve things in their tiles).
-- The first time agents start in a new directory, each tile asks whether
-  you trust that folder.
+Change the team while it runs:
+
+| Command | What it does |
+|---|---|
+| `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... |
+| `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
+| `oratorio status` | What is running, and what you can add. |
+| `oratorio save` | Writes the running team to `oratorio.yaml` in the working folder. |
+| `oratorio down` | Stops everything. |
+
+### Workspaces
+
+A workspace is a research folder with an `oratorio.yaml` in it. Running
+`oratorio up` there starts exactly that team:
+
+```yaml
+agents: [manager, todo, experiment-1, experiment-2]
+model: sonnet                  # optional: one model for every agent
+permission_mode: acceptEdits
+```
+
+Write it by hand, or build the team with `add`/`remove` and run
+`oratorio save`. Without the file, `up` starts one agent per role.
+Only one workspace runs at a time -- all agents share one board.
+
+Options for `up`: `--workdir DIR` (instead of `cd`), `--only manager,todo`,
+`--model haiku`, `--permission-mode MODE`.
+
+- `permission_mode` is how much the agents may do without asking you
+  (Claude Code's own modes). The default, `acceptEdits`, lets them edit
+  files freely but still ask before running most commands, so expect to
+  approve things in their tiles.
+- The first time agents start in a new folder, each tile asks whether you
+  trust that folder.
 - The listeners run in a second tmux window (`Ctrl-b n` to see it).
+- In iTerm2, `tmux -CC attach -t oratorio` shows the tiles as native
+  iTerm2 splits.
+
+### Roles
+
+Each file in `orchestration/roles/` is one role: a few settings on top
+(`model`, `topics`, ...) and a plain-language brief below. `multiple:
+true` lets a role run as several numbered agents; `{agent_id}` in the
+brief is replaced with each agent's own id.
 
 ## How it works
 
@@ -130,7 +165,7 @@ being needed often, or from losing work:
 | `orchestration/docker/` | Postgres container definition. |
 | `orchestration/board_core/` | Post / read / ack / registry logic. No transport in here. |
 | `orchestration/listener/` | One process per agent: `LISTEN`s, registers, heartbeats, hands messages to the session. |
-| `orchestration/session/` | `up.py` starts the team in tmux; `tmux.py` types messages into a pane. |
+| `orchestration/session/` | `up.py` runs the team in tmux (the `oratorio` command); `tmux.py` types messages into a pane. |
 | `orchestration/mcp/` | MCP server exposing the board as tools. `server.py` (stdio, agent can reach Postgres directly) / `server_http.py` (agent on another machine). |
 | `orchestration/watch/` | The board view: a live feed of every message, for you to watch. |
 | `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script. |
@@ -229,9 +264,10 @@ psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
    `002_seed_topics.sql`, `003_persistent_agents.sql`).
 2. **Point at it**: put `ORCH_BOARD_DSN=...` in a `.env` file in the repo
    root (gitignored).
-3. **Start the team**: `python -m orchestration.session.up` (see Quick
-   start). It loads the role files into the board, gives each agent a
-   fresh token, and starts the sessions, listeners and board view.
+3. **Start the team**: `bin/oratorio up` (see Quick start). It loads
+   the role files into the board, gives each agent a fresh token, and
+   starts the sessions, listeners and board view. Put `bin/` on your
+   `PATH`, or link `bin/oratorio` into a folder that already is.
 
 To run one agent by hand instead (another machine, another tool):
 `python -m orchestration.roles.sync_roles` prints its token once; start
@@ -273,8 +309,11 @@ pytest tests/ -v
   did the work and replied, the reply was typed back to `manager`, and
   both acked. After a `/clear`, the unfinished message was handed back.
 
-**Tried with two agents only**
-- The full five-agent team has not been run together yet.
+- Live: adding and removing agents while others keep working, numbered
+  experiment agents, saving a workspace and starting again from it.
+
+**Not tried yet**
+- Message traffic with more than two agents at once.
 
 **Not built yet**
 - **Codex.** The typing mechanism does not care which tool is in the

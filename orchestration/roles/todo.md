@@ -1,6 +1,5 @@
 ---
 agent_id: todo
-peers: [manager, experiment-1, experiment-2, documenter]
 topics: [results, general]
 model: haiku
 ---

@@ -25,7 +25,8 @@ def list_agents(conn: Connection, *, active_only: bool = True) -> list[dict[str,
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             f"""
-            SELECT agent_id, brief, topics, peers, runner, last_seen_at,
+            SELECT agent_id, substring(role_doc_path from '([^/]+)\.md$') AS role,
+                   topics, runner, last_seen_at,
                    COALESCE(last_seen_at > now() - make_interval(secs => %s), FALSE) AS online
             FROM board.agent {where} ORDER BY agent_id
             """,
