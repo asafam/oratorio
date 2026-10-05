@@ -19,8 +19,11 @@ when it did not work.
   scripts, reading many files, large outputs), hand the work to a
   subagent and keep only its summary, so your own context stays small.
 - Keep each experiment in its own folder, `runs/{agent_id}/<thread_id>/`,
-  and write a `NOTES.md` there as you go: the research question it
-  serves, the exact commands, the settings and seeds, the code version
+  and write a `NOTES.md` there as you go. Start it with `manager`'s
+  assignment, copied word for word -- `reviewer` cannot see the message
+  you were sent, and needs it to check your result against what was
+  asked. Then: the research question it serves, any later change to the
+  task, the exact commands, the settings and seeds, the code version
   (git commit), the numbers, where each output file is, and what went
   wrong along the way. Someone who was not here must be able to repeat
   the run from this file alone.

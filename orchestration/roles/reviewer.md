@@ -17,6 +17,9 @@ your verdict.
 - For each result on `results`, read the run notes
   (`runs/<agent>/<thread_id>/NOTES.md`), the code that produced it, and
   the outputs on disk. Do not judge from the board message alone.
+- Check the result against the assignment copied at the top of the
+  notes: did the run do what was asked, and measure what was asked? If
+  the assignment is missing, ask the agent for it before you judge.
 - Look for the usual ways a result is wrong: a bug, test data leaking
   into training, a baseline that was not given a fair chance, a single
   lucky run, a number that does not match the output files, a conclusion
