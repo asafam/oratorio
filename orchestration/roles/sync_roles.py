@@ -9,12 +9,12 @@ sha so a stale DB copy is detectable.
 
 On first sync for a role, generates a fresh bearer token and prints it
 once -- that's the only time it's ever shown in plaintext. Distribute it to
-the role's own launch environment (its receiver process's env) out of band;
+the role's own launch environment (its listener and MCP config) out of band;
 it is never written to disk by this script and never re-derivable from the
 stored hash.
 
 Usage:
-    python -m orchestration.roles.sync_roles [--dry-run] [--rotate AGENT_ID]
+    python -m orchestration.roles.sync_roles [--workspace NAME] [--dry-run] [--rotate AGENT]
 """
 from __future__ import annotations
 
@@ -56,7 +56,9 @@ def git_blob_sha(path: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--rotate", metavar="AGENT_ID", help="force a new token for one agent")
+    parser.add_argument("--rotate", metavar="AGENT", help="force a new token for one agent")
+    parser.add_argument("--workspace", default=registry.DEFAULT_WORKSPACE,
+                        help=f"workspace to put the agents in (default: {registry.DEFAULT_WORKSPACE})")
     args = parser.parse_args()
 
     role_files = sorted(ROLES_DIR.glob("*.md"))
@@ -76,22 +78,20 @@ def main() -> None:
             continue
 
         with pool.connection() as conn:
-            existing = registry.get_role(conn, agent_id)
+            existing = registry.find_agent(conn, args.workspace, agent_id)
             need_token = existing is None or agent_id == args.rotate
             if need_token:
                 token = auth.generate_token()
                 token_hash = auth.hash_token(token)
-                webhook_secret = auth.generate_token()  # separate secret, see schema comment
             else:
-                row = conn.execute(
-                    "SELECT auth_token_hash, webhook_secret FROM board.agent WHERE agent_id = %s",
-                    (agent_id,),
-                ).fetchone()
-                token_hash, webhook_secret = row[0], row[1]
+                token_hash = conn.execute(
+                    "SELECT auth_token_hash FROM board.agent WHERE agent_id = %s", (existing,)
+                ).fetchone()[0]
 
-            registry.upsert_agent(
+            key = registry.upsert_agent(
                 conn,
-                agent_id=agent_id,
+                name=agent_id,
+                workspace=args.workspace,
                 role_doc_path=str(path.relative_to(ROLES_DIR.parents[1])),
                 role_version=role_version,
                 brief=body,
@@ -99,22 +99,17 @@ def main() -> None:
                 topics=meta.get("topics", []),
                 auth_token_hash=token_hash,
                 is_auditor=bool(meta.get("is_auditor", False)),
-                webhook_secret=webhook_secret,
             )
+            if need_token and existing is not None:  # --rotate: upsert never touches a token
+                registry.set_auth_token_hash(conn, key, token_hash)
             conn.commit()
 
         print(f"synced {agent_id!r} (version={role_version})")
         if need_token:
             print(
-                f"  NEW TOKEN for {agent_id!r} (shown once -- this is the MCP bearer\n"
-                f"  token; copy into that role's launch environment as ORCH_AGENT_TOKEN):\n"
+                f"  NEW TOKEN for {agent_id!r} (shown once -- copy into that role's launch\n"
+                f"  environment as ORCH_AGENT_TOKEN, for both its listener and its MCP config):\n"
                 f"  {token}"
-            )
-            print(
-                f"  NEW WEBHOOK SECRET for {agent_id!r} (shown once -- a DIFFERENT secret\n"
-                f"  from the token above; copy into that role's receiver process as\n"
-                f"  ORCH_WEBHOOK_SECRET, used to verify the dispatcher's HMAC signature):\n"
-                f"  {webhook_secret}"
             )
 
 

@@ -2,7 +2,7 @@
 wiring in any MCP transport, webhook, or real LLM process.
 
 Requires a real Postgres reachable at ORCH_BOARD_DSN (schema already
-applied from orchestration/schema/001_init.sql + 002_seed_topics.sql).
+applied -- every numbered file under orchestration/schema/, in order).
 Skipped entirely if that's not set, so this never blocks the unit-test
 suite that runs without any API key/service dependency.
 """
@@ -30,7 +30,7 @@ def _make_agent(conn, agent_id: str, topics: list[str] | None = None, is_auditor
     token = auth.generate_token()
     registry.upsert_agent(
         conn,
-        agent_id=agent_id,
+        name=agent_id,
         role_doc_path=f"orchestration/roles/{agent_id}.md",
         role_version="test",
         brief=f"toy agent {agent_id}",
@@ -76,14 +76,14 @@ def test_topic_fanout_reaches_only_subscribers(conn):
     )
     assert set(result["delivered_to"]) == {"toy-b"}  # sender excluded, toy-c not subscribed
 
-    b_inbox = messages.read_messages(conn, "toy-b", mark_read=False)
+    b_inbox = messages.read_messages(conn, "toy-b")
     assert any(m["id"] == result["message_id"] for m in b_inbox)
 
-    c_inbox = messages.read_messages(conn, "toy-c", mark_read=False)
+    c_inbox = messages.read_messages(conn, "toy-c")
     assert not any(m["id"] == result["message_id"] for m in c_inbox)
 
 
-def test_unread_tracked_independently_per_agent(conn):
+def test_pending_tracked_independently_per_agent(conn):
     _make_agent(conn, "toy-a", topics=["test-topic"])
     _make_agent(conn, "toy-b", topics=["test-topic"])
     _make_agent(conn, "toy-c", topics=["test-topic"])
@@ -93,11 +93,11 @@ def test_unread_tracked_independently_per_agent(conn):
 
     assert not any(
         m["id"] == result["message_id"]
-        for m in messages.read_messages(conn, "toy-b", unread_only=True, mark_read=False)
+        for m in messages.read_messages(conn, "toy-b")
     )
     assert any(
         m["id"] == result["message_id"]
-        for m in messages.read_messages(conn, "toy-c", unread_only=True, mark_read=False)
+        for m in messages.read_messages(conn, "toy-c")
     )
 
 
@@ -127,7 +127,7 @@ def test_direct_reply_correlates_by_id_not_peer_identity(conn):
         in_reply_to=req1["message_id"], content="answer 1",
     )
 
-    a_inbox = {m["id"]: m for m in messages.read_messages(conn, "toy-a", mark_read=False)}
+    a_inbox = {m["id"]: m for m in messages.read_messages(conn, "toy-a")}
     assert a_inbox[reply1["message_id"]]["in_reply_to"] == req1["message_id"]
     assert a_inbox[reply2["message_id"]]["in_reply_to"] == req2["message_id"]
 
@@ -169,7 +169,7 @@ def test_notify_is_not_delivery(conn):
         for i in range(3)
     ]
 
-    inbox_ids = {m["id"] for m in messages.read_messages(conn, "toy-b", mark_read=False)}
+    inbox_ids = {m["id"] for m in messages.read_messages(conn, "toy-b")}
     assert set(ids) <= inbox_ids
 
 
@@ -203,3 +203,103 @@ def test_depth_remaining_stops_reply_cascade(conn):
         conn, "toy-a", recipient="toy-b", msg_type="REPLY", in_reply_to=msg_id, content="too deep"
     )
     assert final["delivered_to"] == []
+
+
+def test_reading_does_not_consume_only_ack_does(conn):
+    """A session that reads a message and is then cleared (or crashes) must
+    not lose it -- only an explicit ack takes it off the pending list."""
+    _make_agent(conn, "toy-a")
+    _make_agent(conn, "toy-b")
+    msg_id = messages.post_message(conn, "toy-a", recipient="toy-b", content="work")["message_id"]
+
+    for _ in range(2):
+        assert [m["id"] for m in messages.read_messages(conn, "toy-b")] == [msg_id]
+    assert not messages.is_caught_up(conn, "toy-b")
+
+    assert messages.ack_message(conn, "toy-b", msg_id)
+    assert messages.read_messages(conn, "toy-b") == []
+    assert messages.is_caught_up(conn, "toy-b")
+
+
+def test_handed_over_but_unacked_is_requeued_for_a_new_session(conn):
+    _make_agent(conn, "toy-a")
+    _make_agent(conn, "toy-b")
+    msg_id = messages.post_message(conn, "toy-a", recipient="toy-b", content="work")["message_id"]
+
+    assert [m["id"] for m in messages.undelivered(conn, "toy-b")] == [msg_id]
+    messages.mark_delivered(conn, "toy-b", [msg_id])
+    assert messages.undelivered(conn, "toy-b") == []  # handed over once, not again
+
+    assert messages.requeue_unacked(conn, "toy-b") == 1  # the session started over
+    assert [m["id"] for m in messages.undelivered(conn, "toy-b")] == [msg_id]
+
+    messages.mark_delivered(conn, "toy-b", [msg_id])
+    messages.ack_message(conn, "toy-b", msg_id)
+    assert messages.requeue_unacked(conn, "toy-b") == 0  # done stays done
+
+
+def test_expired_message_is_not_pending(conn):
+    """The sender's "don't wait for a recipient that is down" choice."""
+    _make_agent(conn, "toy-a")
+    _make_agent(conn, "toy-b")
+    waits = messages.post_message(conn, "toy-a", recipient="toy-b", content="whenever")
+    drops = messages.post_message(
+        conn, "toy-a", recipient="toy-b", content="only matters now", expires_in_seconds=1
+    )
+    assert {m["id"] for m in messages.read_messages(conn, "toy-b")} == {
+        waits["message_id"], drops["message_id"]
+    }
+
+    time.sleep(1.5)
+    assert [m["id"] for m in messages.read_messages(conn, "toy-b")] == [waits["message_id"]]
+    assert [m["id"] for m in messages.undelivered(conn, "toy-b")] == [waits["message_id"]]
+
+
+def test_reply_deadline_is_reported_once_and_only_if_unanswered(conn):
+    _make_agent(conn, "toy-a")
+    _make_agent(conn, "toy-b")
+    answered = messages.post_message(
+        conn, "toy-a", recipient="toy-b", content="q1", reply_within_seconds=1
+    )
+    unanswered = messages.post_message(
+        conn, "toy-a", recipient="toy-b", content="q2", reply_within_seconds=1
+    )
+    messages.post_message(
+        conn, "toy-b", recipient="toy-a", msg_type="REPLY",
+        in_reply_to=answered["message_id"], content="a1",
+    )
+    assert messages.claim_overdue_requests(conn, "toy-a") == []  # deadline not reached yet
+
+    time.sleep(1.5)
+    overdue = messages.claim_overdue_requests(conn, "toy-a")
+    assert [r["id"] for r in overdue] == [unanswered["message_id"]]
+    assert messages.claim_overdue_requests(conn, "toy-a") == []  # told once, not every sweep
+
+
+def test_reply_inherits_thread_id(conn):
+    _make_agent(conn, "toy-a")
+    _make_agent(conn, "toy-b")
+    req = messages.post_message(
+        conn, "toy-a", recipient="toy-b", content="start", thread_id="toy-thread-1"
+    )
+    messages.post_message(
+        conn, "toy-b", recipient="toy-a", msg_type="REPLY",
+        in_reply_to=req["message_id"], content="reply",
+    )
+    assert [m["thread_id"] for m in messages.read_messages(conn, "toy-a")] == ["toy-thread-1"]
+
+
+def test_register_marks_agent_online_and_sets_subscriptions(conn):
+    _make_agent(conn, "toy-a", topics=[])
+    before = {a["agent_id"]: a for a in registry.list_agents(conn)}["toy-a"]
+    assert before["online"] is False and before["runner"] is None
+
+    registry.register(conn, "toy-a", runner="codex", topics=["test-topic"])
+
+    after = {a["agent_id"]: a for a in registry.list_agents(conn)}["toy-a"]
+    assert after["online"] is True and after["runner"] == "codex"
+    assert after["topics"] == ["test-topic"]
+
+    _make_agent(conn, "toy-b")
+    result = messages.post_message(conn, "toy-b", topic="test-topic", content="hi")
+    assert result["delivered_to"] == ["toy-a"]

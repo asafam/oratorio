@@ -31,7 +31,7 @@ def _make_agent(dsn: str, agent_id: str, topics: list[str] | None = None) -> str
     with psycopg.connect(dsn, autocommit=True) as conn:
         registry.upsert_agent(
             conn,
-            agent_id=agent_id,
+            name=agent_id,
             role_doc_path=f"orchestration/roles/{agent_id}.md",
             role_version="test",
             brief=f"toy mcp agent {agent_id}",
@@ -97,6 +97,10 @@ def test_post_then_read_over_real_mcp_protocol(dsn):
     # confirm the delivered message's sender is toy-mcp-a even though the
     # post_message call never mentioned it.
     assert all(m["sender"] == "toy-mcp-a" for m in inbox if m["id"] == posted["message_id"])
+
+    # Reading did not consume it; acking does.
+    assert asyncio.run(_call(dsn, token_b, "ack_message", {"message_id": posted["message_id"]}))["ok"]
+    assert asyncio.run(_call(dsn, token_b, "read_messages", {}))["messages"] == []
 
 
 def test_invalid_token_is_rejected(dsn):

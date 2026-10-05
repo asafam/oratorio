@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Orchestration board MCP server -- Streamable HTTP transport.
 
-This is the transport every agent role actually uses in practice (every
-local role and the remote overseer role are all remote clients of the
-board-host). Runs on the board-host, reachable through that host's own
-Cloudflare Tunnel -- see orchestration/README.md.
+For agent sessions on a different machine than the board. Runs on the
+board-host, reachable through that host's own Cloudflare Tunnel -- see
+the project README. A session that can reach Postgres directly uses the
+stdio transport (server.py) instead.
 
 Auth: a per-role bearer token (Authorization: Bearer <token>), verified
 against board.agent.auth_token_hash via the mcp SDK's TokenVerifier

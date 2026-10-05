@@ -22,14 +22,27 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
         msg_type: str = "DOMAIN",
         in_reply_to: int | None = None,
         expects_reply: bool = False,
+        expires_in_seconds: int | None = None,
+        reply_within_seconds: int | None = None,
+        thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Post a message to the board. Exactly one of recipient/topic/
-        broadcast must be set. `sender` is never a parameter -- it is
+        broadcast must be set; recipient is another agent's name (see
+        list_agents). `sender` is never a parameter -- it is
         resolved server-side from your authenticated identity. To reply to
-        a message, pass its `id` (from read_messages) as in_reply_to with
-        msg_type='REPLY' -- never rely on "a reply just arrived from X",
-        always thread by this id."""
+        a message, pass its `id` as in_reply_to with msg_type='REPLY' --
+        never rely on "a reply just arrived from X", always thread by this
+        id.
+
+        The recipient may be down for minutes or hours, so decide whether
+        this message should wait for it: by default it waits as long as it
+        takes. Set expires_in_seconds if it only matters now (it is dropped
+        if not handled by then). Set reply_within_seconds if you need an
+        answer by a deadline -- you are told once if none arrived.
+
+        thread_id groups messages about the same piece of work; a reply
+        inherits its parent's. Start a new one for unrelated work."""
         sender = get_sender()
         with db.get_pool().connection() as conn:
             result = messages.post_message(
@@ -42,6 +55,9 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
                 msg_type=msg_type,
                 in_reply_to=in_reply_to,
                 expects_reply=expects_reply,
+                expires_in_seconds=expires_in_seconds,
+                reply_within_seconds=reply_within_seconds,
+                thread_id=thread_id,
                 metadata=metadata,
             )
             conn.commit()
@@ -49,30 +65,28 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
 
     @mcp.tool()
     def read_messages(
-        unread_only: bool = True,
+        pending_only: bool = True,
         topic: str | None = None,
         limit: int = 50,
-        mark_read: bool = True,
     ) -> dict[str, Any]:
-        """Read messages delivered to you. This is the durable path --
-        independent of whether you were notified in real time, so call
-        this on startup/wake regardless of why you woke up. Returns
-        {"messages": [...]} -- an empty list means genuinely caught up,
-        not "no response"."""
+        """Read your inbox. Reading never consumes a message -- it stays
+        pending until you ack_message it. New messages are normally handed
+        to you as they arrive; use this to re-check what is still open
+        (e.g. after your context was cleared or compacted), or pass
+        pending_only=False for history. Returns {"messages": [...]} -- an
+        empty list means genuinely caught up, not "no response"."""
         sender = get_sender()
         with db.get_pool().connection() as conn:
             result = messages.read_messages(
-                conn, sender, unread_only=unread_only, topic=topic, limit=limit,
-                mark_read=mark_read,
+                conn, sender, pending_only=pending_only, topic=topic, limit=limit,
             )
-            conn.commit()
         return {"messages": result}
 
     @mcp.tool()
     def ack_message(message_id: int) -> dict[str, bool]:
-        """Explicitly mark one message read, without consuming your whole
-        unread queue -- use after read_messages(mark_read=False) if you
-        want to peek before committing to having handled something."""
+        """Mark one message done. Call this when you have finished acting
+        on a message -- until then it stays pending and is handed to you
+        again if your session starts over."""
         sender = get_sender()
         with db.get_pool().connection() as conn:
             ok = messages.ack_message(conn, sender, message_id)
@@ -100,17 +114,37 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
 
     @mcp.tool()
     def list_agents(active_only: bool = True) -> dict[str, Any]:
+        """Who is on the board: each agent's id, its role, and whether it
+        is online right now. The team changes while you work (agents are
+        added and removed), so check here rather than assuming. An offline
+        agent still receives messages -- they wait in its inbox until it
+        is back. Use get_role(agent_id) for what a role does."""
+        sender = get_sender()
         with db.get_pool().connection() as conn:
-            return {"agents": registry.list_agents(conn, active_only=active_only)}
+            agents = registry.list_agents(
+                conn, workspace=registry.workspace_of(conn, sender), active_only=active_only
+            )
+        # Agents know each other by name; the internal key stays internal.
+        return {"agents": [
+            {"agent_id": a["name"], "role": a["role"], "online": a["online"],
+             "runner": a["runner"], "topics": a["topics"], "last_seen_at": a["last_seen_at"]}
+            for a in agents
+        ]}
 
     @mcp.tool()
     def get_role(agent_id: str | None = None) -> dict[str, Any] | None:
         """Look up a role's brief/peers/topics. Defaults to your own role;
         pass another agent_id to read a peer's brief (informational only,
         not an access grant)."""
-        target = agent_id or get_sender()
+        sender = get_sender()
         with db.get_pool().connection() as conn:
-            return registry.get_role(conn, target)
+            target = sender
+            if agent_id:
+                target = registry.find_agent(conn, registry.workspace_of(conn, sender), agent_id)
+                if target is None:
+                    return None
+            role = registry.get_role(conn, target)
+        return {"agent_id": role["name"], "brief": role["brief"], "topics": role["topics"]}
 
     @mcp.tool()
     def list_topics() -> dict[str, Any]:
@@ -119,8 +153,8 @@ def register_tools(mcp: FastMCP, get_sender: Callable[[], str]) -> None:
 
     @mcp.tool()
     def read_all_messages(since_id: int = 0, limit: int = 200) -> dict[str, Any]:
-        """Auditor-only full board history (bypasses your own inbox
-        entirely). Refused unless your role is flagged is_auditor."""
+        """Auditor-only full history of your workspace (bypasses your own
+        inbox entirely). Refused unless your role is flagged is_auditor."""
         sender = get_sender()
         with db.get_pool().connection() as conn:
             return {"messages": registry.read_all_messages(conn, sender, since_id=since_id, limit=limit)}

@@ -1,0 +1,20 @@
+[Unit]
+Description=Orchestration board listener for agent %i (LISTEN/NOTIFY -> its session)
+# One instance per agent, on the host where that agent's session runs:
+#   systemctl --user enable --now oratorio-listener@monitor
+# Put that agent's ORCH_AGENT_TOKEN and ORCH_RUNNER in
+# ~/.config/oratorio/%i.env (never in git). The DSN must reach the board's
+# Postgres from this host.
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/oratorio
+Environment=ORCH_BOARD_DSN=postgresql://orchestration:CHANGEME@localhost:5433/orchestration_board
+EnvironmentFile=%h/.config/oratorio/%i.env
+ExecStart=%h/oratorio/.venv/bin/python -m orchestration.listener.listen
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
