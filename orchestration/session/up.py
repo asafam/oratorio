@@ -7,8 +7,11 @@ board messages into its pane whenever it is idle.
     oratorio up [-w NAME] [--only a,b] [--model M]    start a workspace
     oratorio add <agent> [-w NAME]                     add one while running
     oratorio remove <agent> [-w NAME]                  close one
+    oratorio tile [agent ...] [-w NAME]                arrange the tiles
     oratorio save [-w NAME]                            write its yaml file
     oratorio attach [-w NAME]                          open its tiles
+    oratorio open <agent|board> [-w NAME]              show one agent alone in this terminal
+    oratorio open --all [-w NAME]                      iTerm2: a new window, one split each
     oratorio status                                    every running workspace
     oratorio down [-w NAME | --all]
 
@@ -173,6 +176,12 @@ work: call `list_agents` to see who is on it right now.
 - Give related messages the same `thread_id`; replies inherit it.
 - After posting, finish your turn. Do NOT wait, sleep or poll for the
   answer -- it is typed in here when it arrives.
+- Every message wakes the agent it goes to, and that costs tokens. Send
+  one only when the other agent has to know or do something. Never send
+  a message just to say thanks, ok or "received" -- `ack_message` already
+  says that. Post to a topic only what every subscriber needs.
+- When you have nothing to do, do nothing: finish your turn and stay
+  idle. Do not check on others or look for work on your own.
 - `read_messages` shows what is still open for you -- check it if your
   context was cleared or compacted.
 
@@ -393,7 +402,55 @@ def window_exists(name: str) -> bool:
     return name in tmux("list-windows", "-t", SESSION, "-F", "#{window_name}").split()
 
 
+def tile_order(agents: list[str], roles: dict[str, Path], tiles: int,
+               chosen: list[str] | None = None) -> list[str]:
+    """The order to lay agent tiles out in. tmux's `tiled` layout fills a
+    grid row by row, in this order.
+
+    With `chosen` (what the user asked for with `oratorio tile`): those
+    agents in that order, then any others. Without: numbered agents of one
+    role (`experiment-1`, `experiment-2`) are put side by side. A group is
+    only side by side if it starts at the beginning of a row, so the
+    one-of-a-kind agents go first when they fill whole rows; otherwise the
+    numbered ones do. `tiles` is how many tiles the window has in all."""
+    if chosen:
+        first = [a for a in chosen if a in agents]
+        return first + sorted((a for a in agents if a not in first), key=_team_order(roles))
+    _, columns = grid(tiles)
+    ordered = sorted(agents, key=_team_order(roles))
+    numbered = [a for a in ordered if is_multiple(roles[resolve_agent(a, roles, set())[1]])]
+    single = [a for a in ordered if a not in numbered]
+    return single + numbered if len(single) % columns == 0 else numbered + single
+
+
+def view_session(agent_id: str) -> str:
+    """The tmux session behind `oratorio open <agent>`: one terminal's own
+    view of the workspace, so it can show a different window from the rest."""
+    return f"view-{SESSION}--{agent_id}"
+
+
+def close_views(agent_id: str | None = None) -> None:
+    """End the `open` views of one agent, or of the whole workspace."""
+    prefix = view_session(agent_id or "")
+    for name in tmux("list-sessions", "-F", "#{session_name}").split():
+        if name == prefix or (agent_id is None and name.startswith(prefix)):
+            subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+
+
 def retile() -> None:
+    if window_exists("agents"):
+        panes = tmux("list-panes", "-t", f"{SESSION}:agents", "-F", "#{pane_id}").split()
+        agents = {a: env["ORCH_TMUX_PANE"] for a, env in running_agents().items()
+                  if env["ORCH_TMUX_PANE"] in panes}
+        # Agents in order, then whatever else is there (the board view) as it was.
+        order = tile_order(list(agents), role_files(), len(panes), load_state().get("tiles"))
+        wanted = [agents[a] for a in order]
+        wanted += [pane for pane in panes if pane not in wanted]
+        for i, pane in enumerate(wanted):
+            if panes[i] != pane:
+                tmux("swap-pane", "-d", "-s", pane, "-t", panes[i])
+                j = panes.index(pane)
+                panes[i], panes[j] = panes[j], panes[i]
     for window in ("agents", "listeners"):
         if window_exists(window):
             tmux("select-layout", "-t", f"{SESSION}:{window}", "tiled")
@@ -414,6 +471,9 @@ def start_agent(conn, agent_id: str, path: Path, state: dict) -> None:
         tmux("set-option", "-t", SESSION, "pane-border-status", "top")
         tmux("set-option", "-t", SESSION, "pane-border-format", " #{pane_title} ")
         tmux("set-option", "-t", SESSION, "mouse", "on")  # click a tile to type in it
+    elif not window_exists("agents"):  # every tile has been opened in a terminal of its own
+        pane = tmux("new-window", "-d", "-t", f"{SESSION}:", "-n", "agents", "-c", workdir,
+                    "-P", "-F", "#{pane_id}", command)
     else:
         pane = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", workdir,
                     "-P", "-F", "#{pane_id}", command)
@@ -505,6 +565,7 @@ def cmd_up(args) -> None:
         "file": str(file) if file else None,
         "model": args.model or workspace.get("model"),
         "models": models,
+        "tiles": workspace.get("tiles"),
         "permission_mode": args.permission_mode or workspace.get("permission_mode")
                            or DEFAULT_PERMISSION_MODE,
     }
@@ -565,6 +626,7 @@ def cmd_remove(args) -> None:
         if record.get(key):
             subprocess.run(["tmux", "kill-pane", "-t", record[key]], capture_output=True)
     forget_agent(args.agent)
+    close_views(args.agent)
     if session_exists():
         retile()
     # Its board row stays: messages sent to it wait in its inbox, and it
@@ -609,6 +671,8 @@ def cmd_save(args) -> None:
     }
     if state.get("model"):
         workspace["model"] = state["model"]
+    if state.get("tiles"):
+        workspace["tiles"] = state["tiles"]
     workspace["permission_mode"] = state["permission_mode"]
     target.write_text(
         f"# Oratorio workspace. Start it from this folder with: oratorio up -w {WORKSPACE}\n"
@@ -616,6 +680,28 @@ def cmd_save(args) -> None:
     )
     STATE_FILE.write_text(json.dumps({**state, "file": str(target)}, indent=2))
     print(f"Saved '{WORKSPACE}' ({len(agents)} agent(s)) to {target}")
+
+
+def cmd_tile(args) -> None:
+    pick_running_workspace(args)
+    running = running_agents()
+    if not running:
+        sys.exit(f"Workspace '{WORKSPACE}' is not running.")
+    unknown = [a for a in args.agents if a not in running]
+    if unknown:
+        sys.exit(f"Not running in '{WORKSPACE}': {', '.join(unknown)}. Running: {', '.join(running)}")
+    STATE_FILE.write_text(json.dumps({**load_state(), "tiles": args.agents or None}, indent=2))
+    # Anything shown on its own with `open` comes back into the tiles.
+    close_views()
+    for name, pane in openable().items():
+        if not window_exists("agents"):
+            tmux("rename-window", "-t", pane, "agents")
+        elif tmux("display-message", "-p", "-t", pane, "#{window_name}") != "agents":
+            tmux("join-pane", "-d", "-s", pane, "-t", f"{SESSION}:agents")
+            tmux("select-layout", "-t", f"{SESSION}:agents", "tiled")  # make room for the next one
+    retile()
+    order = tile_order(list(running), role_files(), len(running) + 1, args.agents)
+    print(f"Tiles, row by row: {', '.join(order)}" + ("" if args.agents else "  (automatic)"))
 
 
 def cmd_status(args) -> None:
@@ -643,7 +729,122 @@ def cmd_attach(args) -> None:
     os.execvp("tmux", ["tmux", verb, "-t", SESSION])
 
 
+def openable() -> dict[str, str]:
+    """What `oratorio open` can show: each running agent, and `board` -> its pane."""
+    panes = {a: env["ORCH_TMUX_PANE"] for a, env in running_agents().items()}
+    for line in tmux("list-panes", "-s", "-t", SESSION, "-F", "#{pane_id} #{pane_title}").splitlines():
+        pane, _, title = line.partition(" ")
+        if title.startswith("BOARD:"):
+            panes["board"] = pane
+    return panes
+
+
+def own_window(name: str, pane: str) -> str:
+    """Move a pane out of the tiles into a window of its own (unless it
+    already has one); return that window's id."""
+    if int(tmux("display-message", "-p", "-t", pane, "#{window_panes}")) > 1:
+        tmux("break-pane", "-d", "-s", pane, "-n", name)
+    window = tmux("display-message", "-p", "-t", pane, "#{window_id}")
+    # Size the window to whoever is looking at it, not to the terminal showing the tiles.
+    tmux("set-window-option", "-t", window, "aggressive-resize", "on")
+    return window
+
+
+def grid(tiles: int) -> tuple[int, int]:
+    """(rows, columns) of the grid tmux's `tiled` layout uses for this many tiles."""
+    rows = columns = 1
+    while rows * columns < tiles:
+        rows += 1
+        if rows * columns < tiles:
+            columns += 1
+    return rows, columns
+
+
+SCREEN_JS = ('ObjC.import("AppKit"); var f=$.NSScreen.mainScreen.visibleFrame, '
+             "p=$.NSScreen.screens.objectAtIndex(0).frame; "
+             "[f.origin.x, p.size.height-(f.origin.y+f.size.height), f.origin.x+f.size.width, "
+             'p.size.height-f.origin.y].map(Math.round).join(", ")')
+
+
+def screen_bounds() -> str | None:
+    """The usable part of the screen in use, as AppleScript window bounds
+    ("left, top, right, bottom"); None if macOS will not say."""
+    done = subprocess.run(["osascript", "-l", "JavaScript", "-e", SCREEN_JS], capture_output=True, text=True)
+    bounds = done.stdout.strip()
+    return bounds if done.returncode == 0 and re.fullmatch(r"-?\d+(, -?\d+){3}", bounds) else None
+
+
+def iterm_script(commands: list[str], bounds: str | None = None) -> str:
+    """AppleScript that opens a new iTerm2 window (filling `bounds`, if
+    given), split into a grid with one split per command, filled row by
+    row. A last row that is not full is spread over the whole width."""
+    _, columns = grid(len(commands))
+    lines = ['tell application "iTerm2"', "activate",
+             "set w to (create window with default profile)"]
+    if bounds:
+        lines += [f"set bounds of w to {{{bounds}}}", "delay 0.3"]  # let it resize before splitting
+    lines.append("set s0 to current session of w")
+    for i in range(columns, len(commands), columns):  # the first split of every later row
+        lines.append(f"tell s{i - columns} to set s{i} to (split horizontally with default profile)")
+    for i in range(len(commands)):  # then each row, left to right
+        if i % columns:
+            lines.append(f"tell s{i - 1} to set s{i} to (split vertically with default profile)")
+    for i, command in enumerate(commands):
+        quoted = command.replace("\\", "\\\\").replace('"', '\\"')
+        # Ctrl-U first: wipe anything already typed there (keys meant for another window).
+        lines.append(f'tell s{i} to write text (ASCII character 21) & "{quoted}"')
+    return "\n".join(lines + ["end tell"])
+
+
+def open_all_in_iterm(panes: dict[str, str]) -> None:
+    agents = [a for a in panes if a != "board"]
+    order = tile_order(agents, role_files(), len(panes), load_state().get("tiles"))
+    order += ["board"] if "board" in panes else []
+    for name in order:  # one at a time, here -- the terminals below then only have to look
+        own_window(name, panes[name])
+    retile()
+    me = shlex.quote(str(REPO / "bin" / "oratorio"))
+    commands = [f"{me} open {shlex.quote(name)} -w {shlex.quote(WORKSPACE)}" for name in order]
+    done = subprocess.run(["osascript", "-e", iterm_script(commands, screen_bounds())], capture_output=True, text=True)
+    if done.returncode != 0:
+        sys.exit(f"Could not drive iTerm2 ({done.stderr.strip()}). Open each one yourself, in a "
+                 f"terminal of its own: oratorio open <{'|'.join(order)}>")
+    print(f"Opened in a new iTerm2 window: {', '.join(order)}")
+
+
+def cmd_open(args) -> None:
+    """Show one agent (or the board view) alone in this terminal. It keeps
+    running in tmux, where its listener can reach it; this terminal is
+    only a window onto it, so closing the terminal closes nothing."""
+    pick_running_workspace(args)
+    if not session_exists():
+        sys.exit(f"Workspace '{WORKSPACE}' is not running.")
+    panes = openable()
+    if args.all:
+        return open_all_in_iterm(panes)
+    if not args.agent:
+        sys.exit(f"Say which one to open ({', '.join(panes)}), or --all.")
+    if os.environ.get("TMUX"):
+        sys.exit("This terminal is already showing tmux. Run `oratorio open` in a plain terminal "
+                 "(in iTerm2: a new split or tab).")
+    pane = panes.get(args.agent)
+    if pane is None:
+        sys.exit(f"'{args.agent}' is not running in '{WORKSPACE}'. You can open: {', '.join(panes)}")
+
+    was_tiled = int(tmux("display-message", "-p", "-t", pane, "#{window_panes}")) > 1
+    window = own_window(args.agent, pane)
+    if was_tiled:
+        retile()
+    view = view_session(args.agent)
+    close_views(args.agent)  # one terminal per agent; a second `open` takes it over
+    os.execvp("tmux", ["tmux", "new-session", "-t", SESSION, "-s", view, ";",
+                       "set-option", "-t", view, "destroy-unattached", "on", ";",
+                       "set-option", "-t", view, "status", "off", ";",
+                       "select-window", "-t", f"{view}:{window}"])
+
+
 def stop_workspace() -> None:
+    close_views()  # they share the workspace's windows, which would otherwise outlive it
     if session_exists():
         tmux("kill-session", "-t", SESSION)
         print(f"Stopped '{WORKSPACE}'.")
@@ -695,8 +896,23 @@ def main() -> None:
     p.add_argument("agent")
     p.set_defaults(run=cmd_remove)
 
+    p = sub.add_parser("tile", parents=[which], help="arrange the tiles",
+                       description="Put the agents' tiles in the order given, filling the grid row by row; "
+                                   "agents you leave out follow. With no agents: back to the automatic order.")
+    p.add_argument("agents", nargs="*", help="agent names, in the order you want their tiles")
+    p.set_defaults(run=cmd_tile)
+
     sub.add_parser("save", parents=[which], help="write the running team to its yaml file").set_defaults(run=cmd_save)
     sub.add_parser("attach", parents=[which], help="open a workspace's tiles").set_defaults(run=cmd_attach)
+    p = sub.add_parser("open", parents=[which], help="show one agent alone in this terminal",
+                       description="Show one running agent, or `board`, alone in this terminal -- for "
+                                   "arranging agents yourself in your terminal's own splits or tabs. The "
+                                   "agent leaves the tiles and keeps running if you close the terminal; "
+                                   "run this again to get it back.")
+    p.add_argument("agent", nargs="?", help="an agent name, or `board`")
+    p.add_argument("--all", action="store_true",
+                   help="iTerm2 only: open a new window with a split for every agent and the board")
+    p.set_defaults(run=cmd_open)
     sub.add_parser("status", help="every running workspace").set_defaults(run=cmd_status)
     p = sub.add_parser("down", parents=[which], help="stop a workspace")
     p.add_argument("--all", action="store_true", help="stop every running workspace")

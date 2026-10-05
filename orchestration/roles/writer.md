@@ -26,9 +26,9 @@ full history lives in the run notes, not here.
   from (path and `thread_id`). Update it in the same step as the paper.
 - When a new result changes or contradicts something already written,
   fix the old text too. Do not leave both versions in the paper.
-- Read `RESEARCH_QUESTIONS.md` so each section says which question it
-  answers. If the paper has a question with no result behind it, tell
-  `manager`.
+- Read the human's research plan (its path is on the first line of
+  `TODO.md`) so each section says which question it answers. If the
+  paper has a question with no result behind it, tell `manager`.
 - If you need a number, a detail or a figure that is not in the run
   notes, ask the agent who ran it. If you need something nobody has run,
   ask `manager`.

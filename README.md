@@ -32,6 +32,9 @@ work to the others through the board.
 | `oratorio attach` | Opens its tiles. |
 | `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... |
 | `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
+| `oratorio open manager` | Shows that one agent (or `board`) alone in the terminal you type it in, so you can arrange agents yourself in your terminal's own splits or tabs. Closing the terminal closes nothing; run it again to get the agent back. |
+| `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board. |
+| `oratorio tile manager experiment-1` | Arranges the tiles in that order, row by row; agents you leave out follow. With no names: the automatic order, which keeps numbered agents side by side. Also brings back any agent you opened on its own. |
 | `oratorio save` | Writes the running team to the workspace's yaml file. |
 | `oratorio status` | Every running workspace, and what can be added to each. |
 | `oratorio down` | Stops a workspace (`--all` for every one). |
