@@ -85,8 +85,36 @@ worth doing first. Acting on that cue is not built yet (see below).
 | `orchestration/board_core/` | Post / read / ack / registry logic. No transport in here. |
 | `orchestration/listener/` | One process per agent: `LISTEN`s, registers, heartbeats, hands messages to the session. |
 | `orchestration/mcp/` | MCP server exposing the board as tools. `server.py` (stdio, agent can reach Postgres directly) / `server_http.py` (agent on another machine). |
+| `orchestration/watch/` | The board view: a live feed of every message, for you to watch. |
 | `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script. |
 | `orchestration/ops/systemd/` | Optional service files (listener, tunnel for `server_http.py`). |
+
+## Watching the agents
+
+Run the board view in its own terminal and leave it open:
+
+```bash
+ORCH_BOARD_DSN=... python -m orchestration.watch.board
+```
+
+It shows who is online, each message as it is posted, and when each
+recipient is handed it and finishes it:
+
+```
+● evaluator  online (claude)
+○ monitor  offline, last seen 12:49:09
+------------------------------------------------------------
+12:49:09  41  evaluator -> #eval-results  [thread run-12]
+          Run 12 done: accuracy 0.83, 2 failures
+          to: dataset, monitor
+12:49:09  41  handed to dataset
+12:49:10  41  dataset finished it
+```
+
+It only reads -- watching never marks a message as seen. It checks the
+database once a second, which is plain code and costs no tokens.
+`--once` prints the current state and exits; `--history N` sets how many
+recent messages to show first.
 
 ## Where things run
 
@@ -103,6 +131,48 @@ If agents run on other machines, each one needs two things:
 Keep the board on a small, always-on host you control, not on a shared
 machine that gets rebooted without warning -- everything else depends on
 it being up.
+
+### Board on a remote server, through an SSH tunnel
+
+If you don't want Postgres on your own machine, put it on a small server
+and reach it through an SSH tunnel. Postgres listens only on that
+server's `localhost`, so it is never exposed to the internet, and both
+the listener and the MCP server use it as if it were local.
+
+On the server (Ubuntu shown):
+
+```bash
+apt install postgresql
+sudo -u postgres psql -c "CREATE ROLE orchestration LOGIN PASSWORD '<password>'"
+sudo -u postgres createdb -O orchestration orchestration_board
+```
+
+Some networks only let web ports out. If SSH on port 22 is blocked from
+where you work, make the server's sshd also listen on 443 (only on a
+server that isn't already serving a website there):
+
+```bash
+printf 'Port 22\nPort 443\n' > /etc/ssh/sshd_config.d/10-oratorio-ports.conf
+systemctl daemon-reload && systemctl restart ssh.socket
+```
+
+On your machine:
+
+```bash
+export ORATORIO_BOARD_HOST=<server address>
+orchestration/ops/scripts/board_tunnel.sh up      # also: down, status
+export ORCH_BOARD_DSN=postgresql://orchestration:<password>@localhost:5433/orchestration_board
+```
+
+Keep those values in a `.env` file (gitignored), never in git.
+
+**Moving the board** somewhere else is a dump and a restore, then
+pointing `ORATORIO_BOARD_HOST` at the new place:
+
+```bash
+pg_dump "$ORCH_BOARD_DSN" > board.sql        # everything, one file
+psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
+```
 
 ## Bring-up order
 
@@ -155,15 +225,14 @@ about what that means today:
   `/compact`).
 - **Noticing a `/clear`** and re-handing open messages on its own.
 
-**Written but not run**
-- `003_persistent_agents.sql` has never been applied to a database.
-- The new queries (expiry and reply deadlines use `make_interval` with
-  bound parameters) have only been syntax-checked as Python, not run.
-- The tests in `tests/` (board, MCP, listener) were updated for the new
-  design but have not been run against it -- no Postgres was available
-  when this was written.
+**Verified**
+- All three schema files apply cleanly to Postgres 16, and the whole
+  suite in `tests/` (board, MCP over stdio, listener, board view) passes
+  -- both against a local database and against a remote one through an
+  SSH tunnel (so `LISTEN`/`NOTIFY` works through the tunnel).
+- The board view was run live against demo agents.
 
 **Still unverified from before**
 - The `mcp` SDK's `TokenVerifier`/`AuthSettings` wiring in
   `orchestration/mcp/server_http.py`.
-- Anything across a real network or tunnel.
+- `server_http.py` across a real network or tunnel.
