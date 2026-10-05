@@ -10,6 +10,7 @@ Apply with:
 ```bash
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/001_init.sql
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/002_seed_topics.sql
+psql "$ORCH_BOARD_DSN" -f orchestration/schema/003_persistent_agents.sql
 ```
 
 `ORCH_BOARD_DSN` points at the `orchestration_board` database on the

@@ -9,7 +9,7 @@ sha so a stale DB copy is detectable.
 
 On first sync for a role, generates a fresh bearer token and prints it
 once -- that's the only time it's ever shown in plaintext. Distribute it to
-the role's own launch environment (its receiver process's env) out of band;
+the role's own launch environment (its listener and MCP config) out of band;
 it is never written to disk by this script and never re-derivable from the
 stored hash.
 
@@ -81,13 +81,10 @@ def main() -> None:
             if need_token:
                 token = auth.generate_token()
                 token_hash = auth.hash_token(token)
-                webhook_secret = auth.generate_token()  # separate secret, see schema comment
             else:
-                row = conn.execute(
-                    "SELECT auth_token_hash, webhook_secret FROM board.agent WHERE agent_id = %s",
-                    (agent_id,),
-                ).fetchone()
-                token_hash, webhook_secret = row[0], row[1]
+                token_hash = conn.execute(
+                    "SELECT auth_token_hash FROM board.agent WHERE agent_id = %s", (agent_id,)
+                ).fetchone()[0]
 
             registry.upsert_agent(
                 conn,
@@ -99,22 +96,15 @@ def main() -> None:
                 topics=meta.get("topics", []),
                 auth_token_hash=token_hash,
                 is_auditor=bool(meta.get("is_auditor", False)),
-                webhook_secret=webhook_secret,
             )
             conn.commit()
 
         print(f"synced {agent_id!r} (version={role_version})")
         if need_token:
             print(
-                f"  NEW TOKEN for {agent_id!r} (shown once -- this is the MCP bearer\n"
-                f"  token; copy into that role's launch environment as ORCH_AGENT_TOKEN):\n"
+                f"  NEW TOKEN for {agent_id!r} (shown once -- copy into that role's launch\n"
+                f"  environment as ORCH_AGENT_TOKEN, for both its listener and its MCP config):\n"
                 f"  {token}"
-            )
-            print(
-                f"  NEW WEBHOOK SECRET for {agent_id!r} (shown once -- a DIFFERENT secret\n"
-                f"  from the token above; copy into that role's receiver process as\n"
-                f"  ORCH_WEBHOOK_SECRET, used to verify the dispatcher's HMAC signature):\n"
-                f"  {webhook_secret}"
             )
 
 

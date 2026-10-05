@@ -1,73 +1,124 @@
 # Oratorio
 
-A shared, durable message board that lets several role-based AI coding
-agents (Claude Code, Codex CLI, or anything else that can speak MCP and be
-triggered by a webhook) coordinate a workflow instead of being driven one
-at a time from a terminal.
+A shared, durable message board (pub/sub) that lets several AI coding
+agents (Claude Code, Codex CLI, or anything else that can speak MCP)
+work together. Each agent is a normal, long-lived session in its own
+terminal. Agents send each other messages through the board and keep
+their own conversation context while they work.
 
 Ships with five example roles for a typical research/eval workflow --
 `evaluator`, `monitor`, `dataset`, `experiment-manager`, `overseer` -- as a
 starting point. Adapt the role files under `orchestration/roles/` to your
 own project; nothing else in this repo is specific to that example.
 
+## How it works
+
+```
+ agent session  --MCP: post / ack-->   BOARD (Postgres)
+ (Claude/Codex)                        topics, inboxes, who is online
+       ^                                     |
+       |  hands the message in               |  NOTIFY ("something new")
+       +----------  listener  <--------------+
+                    (plain code, no tokens)
+```
+
+- **The board** is the bus. Messages go to one agent, to a topic (every
+  subscriber gets it), or to everyone (broadcast). Each recipient gets
+  its own inbox row, saved in the same transaction as the message.
+- **A listener** runs beside each agent session. It waits on Postgres
+  `LISTEN` -- plain code, so waiting costs no tokens -- and hands each new
+  message to the session. The model only runs when there is real work.
+- **MCP** is how the agent talks back: post a message, mark one done,
+  see who is online. It is the "publish" side of the same bus, not a
+  second message system.
+- **The board owns coordination.** Claude and Codex are just workers
+  behind the same interface; swapping one for the other changes nothing
+  on the board.
+
+### An agent can be down for hours
+
+Nothing is lost. A message waits in the recipient's inbox until that
+agent has **acked** it (said "done"). Reading a message does not consume
+it, and neither does a session that crashes or gets cleared mid-task.
+When the listener is restarted, anything the old session was handed but
+never acked is handed in again. So delivery is at-least-once: an agent
+may see the same message id twice.
+
+The listener cannot tell that you typed `/clear` in a session. After a
+clear, either restart that agent's listener or have the agent call
+`read_messages` -- both show what is still open.
+
+### Wait or not -- the sender decides, per message
+
+| Set on the message | Meaning |
+|---|---|
+| nothing | Wait in the inbox as long as it takes (default). |
+| `expires_in_seconds` | Only matters now. Dropped if not handled by then. |
+| `reply_within_seconds` | "I need an answer by then." If none arrives, the sender is told once and decides what to do. |
+
+### Registering
+
+Two separate steps, on purpose:
+
+1. **Identity (once, by you).** `sync_roles.py` creates the agent and
+   prints its token. An agent cannot create itself: it needs a token
+   before the board will talk to it at all.
+2. **"I'm up" (every start, by the agent).** Its listener registers it:
+   what it is (`claude`, `codex`, ...) and that it is online, then keeps
+   a heartbeat going. `list_agents` shows who is online. Agents only
+   ever know the board, never each other's addresses.
+
+### Keeping context under control
+
+Each agent is an ordinary interactive session, so you can type `/compact`
+or `/clear` in its terminal whenever you like. Messages carry a
+`thread_id`; the listener flags a message that starts a different thread
+than the last one (`new_thread`), as the cue that a clear/compact may be
+worth doing first. Acting on that cue is not built yet (see below).
+
 ## Pieces
 
-| Directory | What it is | Runs where |
-|---|---|---|
-| `orchestration/schema/` | Postgres DDL: the durable message board | applied to Postgres on the **board-host** |
-| `orchestration/docker/` | Postgres container definition | **board-host** (see below) |
-| `orchestration/board_core/` | Transport-agnostic post/read/ack/registry logic | imported by mcp/, dispatcher/, receiver/ |
-| `orchestration/mcp/` | MCP server exposing the board as tools | `server.py` (stdio, local dev only) / `server_http.py` (**board-host**, real deployment) |
-| `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script | git-tracked; synced into the DB from wherever you run `sync_roles.py` |
-| `orchestration/dispatcher/` | Watches Postgres NOTIFY, HMAC-signs and POSTs wake-up webhooks | **board-host**, colocated with Postgres |
-| `orchestration/receiver/` | Verifies a webhook, runs the headless `claude -p`/`codex exec` process, drains any backlog | each **local-role host** (one process fronts every role that host runs) |
+| Directory | What it is |
+|---|---|
+| `orchestration/schema/` | Postgres DDL: the board. Numbered files, applied in order. |
+| `orchestration/docker/` | Postgres container definition. |
+| `orchestration/board_core/` | Post / read / ack / registry logic. No transport in here. |
+| `orchestration/listener/` | One process per agent: `LISTEN`s, registers, heartbeats, hands messages to the session. |
+| `orchestration/mcp/` | MCP server exposing the board as tools. `server.py` (stdio, agent can reach Postgres directly) / `server_http.py` (agent on another machine). |
+| `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script. |
+| `orchestration/ops/systemd/` | Optional service files (listener, tunnel for `server_http.py`). |
 
-## Why the board doesn't live on a shared/compute host
+## Where things run
 
-If your agents run on a shared machine (an HPC cluster node, a machine
-other people also use) — that machine typically gets rebooted for
-maintenance outside your control, and may need a proxy/jump host to reach
-directly. That's fine for a role that does actual work there, but a poor
-home for the one component (the board) everything else's correctness
-depends on being reachable and durable. Put the board (Postgres +
-`server_http.py` + the dispatcher) on a small, independent, always-on host
-you fully control instead. Every local role, wherever it runs, becomes an
-equally-ordinary network client of it, reachable only through its own
-outbound-only Cloudflare Tunnel — nobody needs SSH (or a proxy) to reach
-the board itself, only its one authenticated HTTPS endpoint.
+The simple setup is **everything on one machine**: Postgres, and one
+terminal + one listener per agent.
 
-## Durability, in one sentence
+If agents run on other machines, each one needs two things:
+- its **listener** must reach Postgres itself (`LISTEN` is a database
+  feature -- the MCP endpoint alone is not enough), so the database has
+  to be reachable from that machine (private network, VPN, SSH tunnel);
+- its **session** reaches the board through `server_http.py` or, if it
+  has that same database access, plain `server.py`.
 
-`board.message_delivery` (a row per intended recipient, written in the
-same transaction as the message) is the actual queue; Postgres
-`NOTIFY`/`LISTEN` is only a latency hint layered on top — a role that's
-down for hours loses nothing, and `tests/test_board.py::test_notify_is_not_delivery`
-is the permanent regression test for that property.
+Keep the board on a small, always-on host you control, not on a shared
+machine that gets rebooted without warning -- everything else depends on
+it being up.
 
 ## Bring-up order
 
-1. **Board-host**: `orchestration/docker/docker-compose.yml` (see its
-   README), then apply `orchestration/schema/001_init.sql` and
-   `002_seed_topics.sql`.
+1. **Postgres**: `orchestration/docker/docker-compose.yml` (see its
+   README), then apply every file in `orchestration/schema/` in order
+   (`001_init.sql`, `002_seed_topics.sql`, `003_persistent_agents.sql`).
 2. **Sync roles**: `ORCH_BOARD_DSN=... python -m orchestration.roles.sync_roles`
-   — prints a fresh MCP bearer token AND a separate webhook secret per role
-   (shown once each; they are two DIFFERENT secrets for two different
-   trust directions — see the comment on `board.agent.webhook_secret` in
-   `001_init.sql`). Copy them into that role's own environment, never into
-   git.
-3. **MCP server** on the board-host: `orchestration/mcp/server_http.py`
-   (needs `ORCH_BOARD_DSN`, `ORCH_MCP_PUBLIC_URL`), behind its own
-   Cloudflare Tunnel.
-4. **Dispatcher** on the board-host: `orchestration/dispatcher/listen.py`
-   (colocated with Postgres, no tunnel needed for its own `LISTEN`
-   connection).
-5. **Receiver** on each local-role host: copy
-   `orchestration/receiver/roles.example.yaml` to `roles.local.yaml`
-   (gitignored) with the secrets/tokens from step 2, set `ORCH_MCP_URL` to
-   the board-host's tunneled MCP endpoint, run `orchestration/receiver/server.py`
-   behind that host's own Cloudflare Tunnel, then use
-   `registry.set_webhook_url()` (or a direct `UPDATE board.agent`) to point
-   each role's `webhook_url` at that tunnel's `/webhook/<role>` path.
+   -- prints a fresh token per role, shown once. Copy it into that role's
+   own environment, never into git.
+3. **Per agent, the session**: start Claude Code / Codex with the board's
+   MCP server configured (`orchestration/mcp/mcp_config.example.json`).
+4. **Per agent, the listener**:
+   ```bash
+   ORCH_BOARD_DSN=... ORCH_AGENT_TOKEN=<that role's token> ORCH_RUNNER=claude \
+     python -m orchestration.listener.listen
+   ```
 
 ## Setup
 
@@ -79,51 +130,40 @@ pip install -r requirements.txt
 
 ## Running the tests
 
-Most of the suite needs a real Postgres reachable at `ORCH_BOARD_DSN` with
-the schema applied (a throwaway dev instance is fine — see
-`orchestration/docker/README.md`'s dev-vs-real distinction). Tests are
-skipped automatically if `ORCH_BOARD_DSN` isn't set.
+The suite needs a real Postgres reachable at `ORCH_BOARD_DSN` with the
+schema applied (a throwaway dev instance is fine -- see
+`orchestration/docker/README.md`). Tests are skipped automatically if
+`ORCH_BOARD_DSN` isn't set.
 
 ```bash
 export ORCH_BOARD_DSN=postgresql://orchestration:<password>@localhost:5433/orchestration_board
 pytest tests/ -v
 ```
 
-## What's been verified so far vs. what's still unverified
+## Status
 
-**Verified** (throwaway dev Postgres, torn down after each run — see
-`orchestration/docker/README.md`), all as automated tests plus one manual
-live-loopback run:
-- The full schema (fan-out, durability, id-based reply correlation,
-  depth-limited cascades, overseer audit view) — `tests/test_board.py`.
-- The real MCP protocol end-to-end via a live stdio subprocess —
-  `tests/test_mcp.py`.
-- HMAC sign/verify, including the stale-delivery/tampered-body/wrong-secret
-  cases — `tests/test_webhook_auth.py`.
-- The receiver's single-flight lock, queue-coalescing (N wakeups while busy
-  → exactly one follow-up run, not N), and signature/routing HTTP layer —
-  `tests/test_receiver.py`.
-- The dispatcher's real `LISTEN`/`NOTIFY` loop against real Postgres,
-  waking a real HTTP receiver over a real socket with a correctly-signed
-  payload referencing the real message id — `tests/test_dispatcher.py`.
-- Fail-fast-on-permanent-failure delivery behavior (a 401 doesn't burn the
-  full retry/backoff schedule) — `tests/test_deliver.py`.
+This repo was just reworked from "start a fresh headless agent per
+message, via webhooks" to the persistent-agent design above. Be clear
+about what that means today:
 
-**Not yet verified — you'll need a real board-host, a real tunnel, and
-real `claude`/`codex` binaries to close these out:**
-- `claude -p` / `codex exec` exact current flag names (the runners are
-  written against what was documented at the time, flagged inline in
-  `orchestration/receiver/runners/*.py`).
+**Not built yet**
+- **Getting a message into a live session.** The listener's
+  `hand_to_session` only prints each message as a JSON line. Pushing
+  that into a running Claude Code / Codex session, and knowing when the
+  session is idle enough to take it, is the main missing piece.
+- **Acting on `new_thread`** (suggesting or sending `/clear` or
+  `/compact`).
+- **Noticing a `/clear`** and re-handing open messages on its own.
+
+**Written but not run**
+- `003_persistent_agents.sql` has never been applied to a database.
+- The new queries (expiry and reply deadlines use `make_interval` with
+  bound parameters) have only been syntax-checked as Python, not run.
+- The tests in `tests/` (board, MCP, listener) were updated for the new
+  design but have not been run against it -- no Postgres was available
+  when this was written.
+
+**Still unverified from before**
 - The `mcp` SDK's `TokenVerifier`/`AuthSettings` wiring in
-  `orchestration/mcp/server_http.py` — written against the documented
-  protocol, exercised only via stdio so far.
-- Cross-network behavior through an actual Cloudflare Tunnel (everything
-  above was proven on `localhost`).
-- A cloud-hosted role (e.g. Anthropic Managed Agents) — deliberately out
-  of scope for a first deployment; it solves wake-up reachability but not
-  board reachability unless you can attach a remote MCP server to it.
-
-Treat this list as the concrete next-step checklist once a board-host
-actually exists. `orchestration/ops/scripts/verify_monitor_e2e.sh` is a
-manual (not automated) end-to-end checklist for the simplest role once
-real infrastructure is up.
+  `orchestration/mcp/server_http.py`.
+- Anything across a real network or tunnel.

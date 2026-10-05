@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Orchestration board MCP server -- stdio transport.
 
-For local development/testing directly on the board-host (no network hop).
-None of the five agent roles use this transport in practice once deployed
--- they're all remote clients of the board-host and use server_http.py
-instead. See orchestration/mcp/mcp_config.example.json.
+For an agent session that can reach the board's Postgres directly (same
+machine or same private network) -- the session launches this as a
+subprocess, no network hop. An agent on another machine uses
+server_http.py instead. See orchestration/mcp/mcp_config.example.json.
 
 Identity: stdio is process-local and already trusted (whatever launched
 this subprocess controls its environment), so the caller's identity is

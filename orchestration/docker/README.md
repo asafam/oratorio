@@ -44,6 +44,7 @@ Apply the schema once the container is up:
 export ORCH_BOARD_DSN="postgresql://orchestration:${ORCH_BOARD_PG_PASSWORD}@localhost:${ORCH_BOARD_PG_PORT:-5433}/orchestration_board"
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/001_init.sql
 psql "$ORCH_BOARD_DSN" -f orchestration/schema/002_seed_topics.sql
+psql "$ORCH_BOARD_DSN" -f orchestration/schema/003_persistent_agents.sql
 ```
 
 ## Teardown

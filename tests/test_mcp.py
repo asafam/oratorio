@@ -98,6 +98,10 @@ def test_post_then_read_over_real_mcp_protocol(dsn):
     # post_message call never mentioned it.
     assert all(m["sender"] == "toy-mcp-a" for m in inbox if m["id"] == posted["message_id"])
 
+    # Reading did not consume it; acking does.
+    assert asyncio.run(_call(dsn, token_b, "ack_message", {"message_id": posted["message_id"]}))["ok"]
+    assert asyncio.run(_call(dsn, token_b, "read_messages", {}))["messages"] == []
+
 
 def test_invalid_token_is_rejected(dsn):
     with pytest.raises(Exception):

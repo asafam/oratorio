@@ -10,6 +10,12 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 
+# An agent counts as online if its listener has checked in this recently.
+# Derived from last_seen_at on every read -- never a stored status, which
+# would go stale the moment a listener dies without saying goodbye.
+ONLINE_WINDOW_SECONDS = 120
+
+
 class AuthorizationError(Exception):
     pass
 
@@ -18,9 +24,39 @@ def list_agents(conn: Connection, *, active_only: bool = True) -> list[dict[str,
     where = "WHERE active" if active_only else ""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"SELECT agent_id, brief, topics, peers FROM board.agent {where} ORDER BY agent_id"
+            f"""
+            SELECT agent_id, brief, topics, peers, runner, last_seen_at,
+                   COALESCE(last_seen_at > now() - make_interval(secs => %s), FALSE) AS online
+            FROM board.agent {where} ORDER BY agent_id
+            """,
+            (ONLINE_WINDOW_SECONDS,),
         )
         return cur.fetchall()
+
+
+def register(
+    conn: Connection, agent_id: str, *, runner: str, topics: list[str] | None = None
+) -> None:
+    """An agent announcing "I'm up" -- called by its listener on start.
+    Records what it is and marks it seen; if `topics` is given, its
+    subscriptions are set to exactly that list. This does NOT create the
+    agent or its token: identity is issued once, out of band (see
+    orchestration/roles/sync_roles.py), and `agent_id` here must already
+    be resolved from that token."""
+    conn.execute(
+        "UPDATE board.agent SET runner = %s, last_seen_at = now(), updated_at = now() "
+        "WHERE agent_id = %s",
+        (runner, agent_id),
+    )
+    if topics is not None:
+        conn.execute(
+            "UPDATE board.agent SET topics = %s WHERE agent_id = %s", (topics, agent_id)
+        )
+        _set_subscriptions(conn, agent_id, topics)
+
+
+def heartbeat(conn: Connection, agent_id: str) -> None:
+    conn.execute("UPDATE board.agent SET last_seen_at = now() WHERE agent_id = %s", (agent_id,))
 
 
 def get_role(conn: Connection, agent_id: str) -> dict[str, Any] | None:
@@ -57,50 +93,6 @@ def subscribe(conn: Connection, agent_id: str, topic: str, *, backfill: bool = F
             """,
             (agent_id, topic, agent_id),
         )
-
-
-def try_consume_wake_budget(conn: Connection, agent_id: str) -> dict[str, Any] | None:
-    """Atomically check-and-increment this agent's rolling wake budget --
-    combining the read (active? under budget?) and the write (increment)
-    into one UPDATE avoids a check-then-act race between two dispatcher
-    wake attempts landing concurrently. Lazily resets the counter if the
-    rolling 1h window has elapsed, so no external cron job is needed.
-    Returns {webhook_url, webhook_secret} if the caller should proceed with
-    delivery, or None if the role is inactive (kill switch) or has hit its
-    hourly wake budget (runaway-cascade guard, alongside depth_remaining)."""
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            UPDATE board.agent
-            SET wakes_this_hour = CASE
-                    WHEN now() - wake_window_started_at > INTERVAL '1 hour' THEN 1
-                    ELSE wakes_this_hour + 1
-                END,
-                wake_window_started_at = CASE
-                    WHEN now() - wake_window_started_at > INTERVAL '1 hour' THEN now()
-                    ELSE wake_window_started_at
-                END
-            WHERE agent_id = %s AND active
-              AND (
-                    now() - wake_window_started_at > INTERVAL '1 hour'
-                    OR wakes_this_hour < wake_budget
-                  )
-            RETURNING webhook_url, webhook_secret
-            """,
-            (agent_id,),
-        )
-        return cur.fetchone()
-
-
-def set_webhook_url(conn: Connection, agent_id: str, webhook_url: str) -> None:
-    """Set/update where the dispatcher should POST a wake-up for this role.
-    Separate from upsert_agent (called at role-sync time, before the
-    receiver's tunnel URL is necessarily known yet) -- an ops step run once
-    the role's receiver + tunnel are actually up."""
-    conn.execute(
-        "UPDATE board.agent SET webhook_url = %s, updated_at = now() WHERE agent_id = %s",
-        (webhook_url, agent_id),
-    )
 
 
 def unsubscribe(conn: Connection, agent_id: str, topic: str) -> None:
@@ -146,24 +138,22 @@ def upsert_agent(
     topics: list[str],
     auth_token_hash: str,
     is_auditor: bool = False,
-    webhook_url: str | None = None,
-    webhook_secret: str | None = None,
 ) -> None:
     """Used by orchestration/roles/sync_roles.py to load a role's markdown
     file into the registry. Git (the role file) is authoritative; this row
     is a derived cache -- role_version (a git blob sha) lets a caller detect
     a stale DB copy."""
-    # webhook_url/webhook_secret are intentionally NOT in the UPDATE SET
-    # list below, same as auth_token_hash: sync_roles.py is responsible for
-    # fetching-or-generating the right value BEFORE calling this function
-    # (see its need_token/need_secret logic), so re-syncing role metadata
-    # (brief, peers, topics) on every run never silently clobbers a secret.
+    # auth_token_hash is intentionally NOT in the UPDATE SET list below:
+    # sync_roles.py is responsible for fetching-or-generating the right
+    # value BEFORE calling this function (see its need_token logic), so
+    # re-syncing role metadata (brief, peers, topics) on every run never
+    # silently clobbers a token.
     conn.execute(
         """
         INSERT INTO board.agent
             (agent_id, role_doc_path, role_version, brief, peers, topics,
-             auth_token_hash, is_auditor, webhook_url, webhook_secret)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             auth_token_hash, is_auditor)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (agent_id) DO UPDATE SET
             role_doc_path = EXCLUDED.role_doc_path,
             role_version = EXCLUDED.role_version,
@@ -182,14 +172,15 @@ def upsert_agent(
             topics,
             auth_token_hash,
             is_auditor,
-            webhook_url,
-            webhook_secret,
         ),
     )
+    _set_subscriptions(conn, agent_id, topics)
+
+
+def _set_subscriptions(conn: Connection, agent_id: str, topics: list[str]) -> None:
     # Reconcile subscriptions to exactly match `topics` -- add what's
-    # missing, remove what's no longer listed. Git (the role file) is
-    # authoritative, so an edit that drops a topic must actually revoke
-    # that subscription, not just leave a stale row from a previous sync.
+    # missing, remove what's no longer listed -- so dropping a topic
+    # actually revokes that subscription, not just leaves a stale row.
     conn.execute(
         "DELETE FROM board.subscription WHERE agent_id = %s AND NOT (topic = ANY(%s))",
         (agent_id, topics),
