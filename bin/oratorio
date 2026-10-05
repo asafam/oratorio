@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the agent team from any folder: `oratorio up`, `oratorio add todo`, ...
+# Run the agent team from any folder: `oratorio up`, `oratorio add reviewer`, ...
 # Uses this repo's own Python environment, wherever you call it from.
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
 exec "$REPO/.venv/bin/python" "$REPO/orchestration/session/up.py" "$@"

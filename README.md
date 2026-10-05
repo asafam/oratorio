@@ -7,7 +7,7 @@ terminal. Agents send each other messages through the board and keep
 their own conversation context while they work.
 
 Ships with a small research team as a starting point -- `manager`,
-`todo`, `experiment` (as many as you want), `documenter` -- and one
+`experiment` (as many as you want), `reviewer`, `writer` -- and one
 command that opens them as tiles in a single terminal window, next to a
 live view of what they are saying to each other. Adapt the role files
 under `orchestration/roles/` to your own project; nothing else in this
@@ -48,8 +48,12 @@ A workspace is described by a small yaml file:
 ```yaml
 name: thesis
 workdir: .                     # where its agents work; default: this file's folder
-agents: [manager, todo, experiment-1, experiment-2]
-model: sonnet                  # optional: one model for every agent
+agents:
+  manager:
+    model: opus                # optional: a model for this agent
+  experiment-1:
+  experiment-2:
+model: sonnet                  # optional: one model for every other agent
 permission_mode: acceptEdits
 ```
 
@@ -74,12 +78,12 @@ Leaving `-w` out is a shortcut, not a rule:
 
 A folder is not tied to one workspace, and a workspace is not tied to
 the folder its file sits in (`workdir`). Two teams working in the same
-folder at once can overwrite each other's files (both `todo` agents
+folder at once can overwrite each other's files (both `manager` agents
 write `TODO.md`, for example) -- nothing stops you, so point them at
 different folders unless you mean it. Two running workspaces cannot
 share a name.
 
-More options for `up`: `--only manager,todo`, `--model haiku`,
+More options for `up`: `--only manager,reviewer`, `--model haiku`,
 `--permission-mode MODE`, `--workdir DIR` (look there for workspace
 files instead of the current folder).
 

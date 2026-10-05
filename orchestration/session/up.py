@@ -23,9 +23,21 @@ A workspace can be described in a yaml file, in any folder:
 
     name: thesis
     workdir: .                   # where its agents work; default: the file's folder
-    agents: [manager, todo, experiment-1, experiment-2]
+    agents:
+      manager:
+        model: opus              # optional: a model for this agent
+      experiment-1:
+      experiment-2:
     model: sonnet                # optional: one model for every agent
     permission_mode: acceptEdits
+
+(`agents: [manager, experiment-1]` also works when no agent needs a
+setting of its own.)
+
+Which model an agent gets -- the most specific thing you said wins: the
+`model` under that agent, then the team's `model:`, then the role file's
+own `model`. `up --model M` puts every agent on M for that run;
+`add <agent> --model M` sets it for that one agent.
 
 Name the file `oratorio.yaml`, or `<anything>.oratorio.yaml` to keep
 several in one folder. `-w NAME` always says which workspace you mean.
@@ -253,6 +265,44 @@ def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
     return meta, brief, token
 
 
+AGENT_SETTINGS = {"model"}
+
+
+def parse_agents(entries) -> list[tuple[str, dict]]:
+    """The `agents:` part of a workspace file as (name, settings) pairs.
+
+    Either a plain list of names, or names with their own settings under
+    them (`manager: {model: opus}`; nothing under a name means no
+    settings). Raises ValueError for anything else."""
+    if isinstance(entries, dict):
+        pairs = list(entries.items())
+    elif isinstance(entries, list):
+        pairs = []
+        for entry in entries:
+            if isinstance(entry, dict) and len(entry) == 1:
+                pairs.extend(entry.items())
+            else:
+                pairs.append((entry, None))
+    else:
+        raise ValueError("`agents:` must be a list of agent names, or names with settings under them.")
+    agents = []
+    for name, settings in pairs:
+        if not isinstance(name, str):
+            raise ValueError(f"`agents:` has an entry that is not an agent name: {name!r}")
+        settings = {} if settings is None else settings
+        if not isinstance(settings, dict) or set(settings) - AGENT_SETTINGS:
+            raise ValueError(f"Under agent '{name}' only these can be set: {', '.join(sorted(AGENT_SETTINGS))}")
+        agents.append((name, settings))
+    return agents
+
+
+def model_for(agent_id: str, role_model: str | None, state: dict) -> str:
+    """The model one agent runs on. What the user set wins over the role
+    file, and the more specific setting wins: this agent, then the whole
+    team."""
+    return (state.get("models") or {}).get(agent_id) or state.get("model") or role_model or "sonnet"
+
+
 def write_private(path: Path, text: str) -> None:
     path.write_text(text)
     path.chmod(0o600)
@@ -292,7 +342,7 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
 
     command = [
         "claude", "-n", agent_id,
-        "--model", state.get("model") or meta.get("model", "sonnet"),
+        "--model", model_for(agent_id, meta.get("model"), state),
         # Skip user-level plugins/hooks/MCP servers: an agent needs the
         # board and its role, not everything installed on this machine.
         "--setting-sources", "project",
@@ -429,21 +479,32 @@ def cmd_up(args) -> None:
         sys.exit(f"Working folder does not exist: {workdir}")
 
     roles = role_files()
+    def resolve_all(names) -> dict[str, str]:  # agent name -> role
+        team: dict[str, str] = {}
+        for entry in names:
+            agent_id, role = resolve_agent(entry, roles, set(team))
+            team[agent_id] = role
+        return team
+
     # Command line wins over the workspace file, which wins over "one per role".
-    names = args.only.split(",") if args.only else workspace.get("agents") or list(roles)
-    wanted: dict[str, str] = {}  # agent name -> role
-    for entry in names:
-        try:
-            agent_id, role = resolve_agent(entry, roles, set(wanted))
-        except ValueError as e:
-            sys.exit(str(e))
-        wanted[agent_id] = role
+    try:
+        listed = parse_agents(workspace["agents"]) if workspace.get("agents") else [(r, {}) for r in roles]
+        in_file = resolve_all(name for name, _ in listed)
+        wanted = resolve_all(args.only.split(",")) if args.only else in_file
+    except ValueError as e:
+        sys.exit(str(e))
+    # `--model` is for every agent, so it also replaces the file's per-agent models.
+    models = {} if args.model else {
+        agent_id: settings["model"]
+        for agent_id, (_, settings) in zip(in_file, listed) if settings.get("model")
+    }
 
     state = {
         "name": name,
         "workdir": str(workdir),
         "file": str(file) if file else None,
         "model": args.model or workspace.get("model"),
+        "models": models,
         "permission_mode": args.permission_mode or workspace.get("permission_mode")
                            or DEFAULT_PERMISSION_MODE,
     }
@@ -485,8 +546,9 @@ def cmd_add(args) -> None:
     if agent_id in running:
         sys.exit(f"'{agent_id}' is already running.")
     state = load_state()
-    if args.model:
-        state = {**state, "model": args.model}
+    if args.model:  # for this agent only; kept, so `save` writes it down
+        state = {**state, "models": {**(state.get("models") or {}), agent_id: args.model}}
+        STATE_FILE.write_text(json.dumps(state, indent=2))
     pool = connect()
     with pool.connection() as conn:
         start_agent(conn, agent_id, roles[role], state)
@@ -536,10 +598,14 @@ def cmd_save(args) -> None:
         if target.exists():
             target = workdir / f"{WORKSPACE}{WORKSPACE_SUFFIX}"
 
+    team = sorted(agents, key=_team_order(role_files()))
+    models = state.get("models") or {}
     workspace = {
         "name": WORKSPACE,
         "workdir": os.path.relpath(workdir, target.parent),
-        "agents": sorted(agents, key=_team_order(role_files())),
+        # Names only, unless some agent has a model of its own.
+        "agents": {a: {"model": models[a]} if a in models else {} for a in team}
+                  if any(a in models for a in team) else team,
     }
     if state.get("model"):
         workspace["model"] = state["model"]
@@ -613,14 +679,16 @@ def main() -> None:
                                    "or, with none, a workspace named after the folder.")
     p.add_argument("--workdir", metavar="DIR", help="folder to look in for workspace files (default: current)")
     p.add_argument("--only", help="comma-separated agents to start (default: the workspace file, else one per role)")
-    p.add_argument("--model", help="one model for every agent (default: each role's own)")
+    p.add_argument("--model", help="one model for every agent on this run (default: what the "
+                                   "workspace file says, else each role's own)")
     p.add_argument("--permission-mode",
                    help=f"Claude Code permission mode for the agents (default: {DEFAULT_PERMISSION_MODE})")
     p.set_defaults(run=cmd_up)
 
     p = sub.add_parser("add", parents=[which], help="add one agent to a running workspace")
     p.add_argument("agent", help="a role (experiment -> next free experiment-N) or an exact agent name")
-    p.add_argument("--model", help="model for this agent (default: same as the rest)")
+    p.add_argument("--model", help="model for this agent only (default: what the workspace "
+                                   "or its role says)")
     p.set_defaults(run=cmd_add)
 
     p = sub.add_parser("remove", parents=[which], help="close one agent")
