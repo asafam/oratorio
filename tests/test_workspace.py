@@ -103,6 +103,14 @@ def test_iterm_commands_are_quoted_for_applescript():
 
 
 def test_iterm_splits_can_go_in_a_new_tab_instead_of_a_new_window():
-    script = iterm_script(["a", "b", "c", "d"], tab=True)
+    script = iterm_script(["a", "b", "c", "d"], "tab")
     assert "create tab" in script and "create window" not in script
     assert "tell s0 to set s1 to (split vertically" in script
+
+
+def test_iterm_splits_can_go_under_the_terminal_the_command_was_typed_in():
+    script = iterm_script(["a", "b", "c"], "here", session_id="ABC-123")
+    assert 'if id of s is "ABC-123" then set con to s' in script
+    assert "create window" not in script and "create tab" not in script
+    assert "tell con to set s0 to (split horizontally" in script   # the console keeps the top
+    assert "tell con to write text" not in script                  # and nothing is typed into it

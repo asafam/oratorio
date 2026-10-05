@@ -33,7 +33,7 @@ work to the others through the board.
 | `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... |
 | `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
 | `oratorio open manager` | Shows that one agent (or `board`) alone in the terminal you type it in, so you can arrange agents yourself in your terminal's own splits or tabs. Closing the terminal closes nothing; run it again to get the agent back. |
-| `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board. Add `--tab` for a new tab in the current window instead. |
+| `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board. Add `--tab` for a new tab in the current window instead, or `--here` to put the splits under the terminal you typed it in, which stays on top as your console. |
 | `oratorio tile manager experiment-1` | Arranges the tiles in that order, row by row; agents you leave out follow. With no names: the automatic order, which keeps numbered agents side by side. Also brings back any agent you opened on its own. |
 | `oratorio save` | Writes the running team to the workspace's yaml file. |
 | `oratorio status` | Every running workspace, and what can be added to each. |
@@ -306,8 +306,8 @@ psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
    root (gitignored).
 3. **Start the team**: `bin/oratorio up` (see Quick start). It loads
    the role files into the board, gives each agent a fresh token, and
-   starts the sessions, listeners and board view. Put `bin/` on your
-   `PATH`, or link `bin/oratorio` into a folder that already is.
+   starts the sessions, listeners and board view. To type plain
+   `oratorio` from any folder, see Setup below.
 
 To run one agent by hand instead (another machine, another tool):
 `python -m orchestration.roles.sync_roles [--workspace NAME]` prints its
@@ -325,6 +325,30 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+### The `oratorio` command
+
+`bin/oratorio` is a small script that runs the launcher with this repo's
+own `.venv`, so it works from any folder. To call it as plain `oratorio`,
+link it into a folder that is on your `PATH` -- run this from the repo
+root:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s "$PWD/bin/oratorio" ~/.local/bin/oratorio
+```
+
+If `oratorio` is then "command not found", `~/.local/bin` is not on your
+`PATH` yet. Add this line to `~/.zshrc` (or `~/.bashrc`) and open a new
+terminal:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+It is a link, not a copy: pulling new code updates the command, and
+moving the repo breaks it (make the link again). To remove it:
+`rm ~/.local/bin/oratorio`.
 
 ## Running the tests
 

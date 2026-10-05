@@ -11,7 +11,8 @@ board messages into its pane whenever it is idle.
     oratorio save [-w NAME]                            write its yaml file
     oratorio attach [-w NAME]                          open its tiles
     oratorio open <agent|board> [-w NAME]              show one agent alone in this terminal
-    oratorio open --all [--tab] [-w NAME]              iTerm2: a new window (or tab), one split each
+    oratorio open --all [--tab|--here] [-w NAME]       iTerm2: one split each, in a new window,
+                                                       a new tab, or under this terminal
     oratorio status                                    every running workspace
     oratorio down [-w NAME | --all]
 
@@ -696,6 +697,7 @@ def cmd_tile(args) -> None:
     for name, pane in openable().items():
         if not window_exists("agents"):
             tmux("rename-window", "-t", pane, "agents")
+            tmux("set-window-option", "-t", pane, "pane-border-format", " #{pane_title} ")
         elif tmux("display-message", "-p", "-t", pane, "#{window_name}") != "agents":
             tmux("join-pane", "-d", "-s", pane, "-t", f"{SESSION}:agents")
             tmux("select-layout", "-t", f"{SESSION}:agents", "tiled")  # make room for the next one
@@ -745,8 +747,14 @@ def own_window(name: str, pane: str) -> str:
     if int(tmux("display-message", "-p", "-t", pane, "#{window_panes}")) > 1:
         tmux("break-pane", "-d", "-s", pane, "-n", name)
     window = tmux("display-message", "-p", "-t", pane, "#{window_id}")
-    # Size the window to whoever is looking at it, not to the terminal showing the tiles.
+    # Size the window to the terminal looking at it. Both are needed: left
+    # alone, tmux sizes every window to the terminal last typed in, which
+    # leaves dead space in the others.
     tmux("set-window-option", "-t", window, "aggressive-resize", "on")
+    tmux("set-window-option", "-t", window, "window-size", "smallest")
+    # Its name along the top edge, so it is clear who is in which terminal.
+    tmux("set-window-option", "-t", window, "pane-border-status", "top")
+    tmux("set-window-option", "-t", window, "pane-border-format", f" #[bold]{name}#[default] ")
     return window
 
 
@@ -774,18 +782,30 @@ def screen_bounds() -> str | None:
     return bounds if done.returncode == 0 and re.fullmatch(r"-?\d+(, -?\d+){3}", bounds) else None
 
 
-def iterm_script(commands: list[str], bounds: str | None = None, tab: bool = False) -> str:
-    """AppleScript that opens a new iTerm2 window (filling `bounds`, if
-    given) -- or, with `tab`, a new tab in the window in front -- split
-    into a grid with one split per command, filled row by row. A last row
-    that is not full is spread over the whole width."""
+def iterm_script(commands: list[str], where: str = "window", bounds: str | None = None,
+                 session_id: str | None = None) -> str:
+    """AppleScript that lays the commands out in iTerm2 as a grid of
+    splits, one per command, filled row by row. A last row that is not
+    full is spread over the whole width.
+
+    `where` is "window" (a new window, filling `bounds` if given), "tab"
+    (a new tab in the window in front), or "here": under the split with
+    id `session_id` -- the one the command was typed in, which stays on
+    top as it is."""
     _, columns = grid(len(commands))
-    lines = ['tell application "iTerm2"', "activate"]
-    if tab:
-        lines += ["tell current window to set t to (create tab with default profile)",
+    lines = ['tell application "iTerm2"']
+    if where == "here":
+        lines += ["set con to missing value",
+                  "repeat with w in windows", "repeat with t in tabs of w", "repeat with s in sessions of t",
+                  f'if id of s is "{session_id}" then set con to s',
+                  "end repeat", "end repeat", "end repeat",
+                  "if con is missing value then set con to current session of current window",
+                  "tell con to set s0 to (split horizontally with default profile)"]
+    elif where == "tab":
+        lines += ["activate", "tell current window to set t to (create tab with default profile)",
                   "set s0 to current session of t"]
     else:
-        lines.append("set w to (create window with default profile)")
+        lines += ["activate", "set w to (create window with default profile)"]
         if bounds:
             lines += [f"set bounds of w to {{{bounds}}}", "delay 0.3"]  # let it resize before splitting
         lines.append("set s0 to current session of w")
@@ -801,7 +821,7 @@ def iterm_script(commands: list[str], bounds: str | None = None, tab: bool = Fal
     return "\n".join(lines + ["end tell"])
 
 
-def open_all_in_iterm(panes: dict[str, str], tab: bool = False) -> None:
+def open_all_in_iterm(panes: dict[str, str], where: str = "window") -> None:
     agents = [a for a in panes if a != "board"]
     order = tile_order(agents, role_files(), len(panes), load_state().get("tiles"))
     order += ["board"] if "board" in panes else []
@@ -810,12 +830,15 @@ def open_all_in_iterm(panes: dict[str, str], tab: bool = False) -> None:
     retile()
     me = shlex.quote(str(REPO / "bin" / "oratorio"))
     commands = [f"{me} open {shlex.quote(name)} -w {shlex.quote(WORKSPACE)}" for name in order]
-    done = subprocess.run(["osascript", "-e", iterm_script(commands, None if tab else screen_bounds(), tab)],
-                          capture_output=True, text=True)
+    # iTerm2 names each split in ITERM_SESSION_ID, as "w0t0p0:<id>".
+    session_id = os.environ.get("ITERM_SESSION_ID", "").rpartition(":")[2]
+    script = iterm_script(commands, where, screen_bounds() if where == "window" else None, session_id)
+    done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     if done.returncode != 0:
         sys.exit(f"Could not drive iTerm2 ({done.stderr.strip()}). Open each one yourself, in a "
                  f"terminal of its own: oratorio open <{'|'.join(order)}>")
-    print(f"Opened in a new iTerm2 {'tab' if tab else 'window'}: {', '.join(order)}")
+    place = {"window": "in a new iTerm2 window", "tab": "in a new iTerm2 tab", "here": "under this terminal"}
+    print(f"Opened {place[where]}: {', '.join(order)}")
 
 
 def cmd_open(args) -> None:
@@ -826,10 +849,13 @@ def cmd_open(args) -> None:
     if not session_exists():
         sys.exit(f"Workspace '{WORKSPACE}' is not running.")
     panes = openable()
+    if args.tab and args.here:
+        sys.exit("Use --tab or --here, not both.")
     if args.all:
-        return open_all_in_iterm(panes, args.tab)
-    if args.tab:
-        sys.exit("--tab goes with --all. For one agent, open a tab yourself and run `oratorio open <agent>` in it.")
+        return open_all_in_iterm(panes, "tab" if args.tab else "here" if args.here else "window")
+    if args.tab or args.here:
+        sys.exit("--tab and --here go with --all. For one agent, make the tab or split yourself "
+                 "and run `oratorio open <agent>` in it.")
     if not args.agent:
         sys.exit(f"Say which one to open ({', '.join(panes)}), or --all.")
     if os.environ.get("TMUX"):
@@ -848,6 +874,9 @@ def cmd_open(args) -> None:
     os.execvp("tmux", ["tmux", "new-session", "-t", SESSION, "-s", view, ";",
                        "set-option", "-t", view, "destroy-unattached", "on", ";",
                        "set-option", "-t", view, "status", "off", ";",
+                       # The terminal's own title (tab, or iTerm2's bar over each split).
+                       "set-option", "-t", view, "set-titles", "on", ";",
+                       "set-option", "-t", view, "set-titles-string", f"{args.agent} - {WORKSPACE}", ";",
                        "select-window", "-t", f"{view}:{window}"])
 
 
@@ -922,6 +951,9 @@ def main() -> None:
                    help="iTerm2 only: open a new window with a split for every agent and the board")
     p.add_argument("--tab", action="store_true",
                    help="with --all: a new tab in the iTerm2 window in front, instead of a new window")
+    p.add_argument("--here", action="store_true",
+                   help="with --all: splits under the terminal you type this in, which stays on top "
+                        "as your console")
     p.set_defaults(run=cmd_open)
     sub.add_parser("status", help="every running workspace").set_defaults(run=cmd_status)
     p = sub.add_parser("down", parents=[which], help="stop a workspace")
