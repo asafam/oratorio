@@ -9,7 +9,12 @@
 # SSH goes over port 443 by default, because some networks only let web
 # ports out. The server's sshd must listen there (see the README).
 #
-# Usage:  ORATORIO_BOARD_HOST=<server> board_tunnel.sh [up|down|status]
+# The tunnel is one ssh process: it ends when the network changes, the
+# laptop sleeps, or the server stops answering, and nothing brings it
+# back. `keep` does: it stays running and reopens the tunnel whenever it
+# is gone. `oratorio up` starts one beside the listeners.
+#
+# Usage:  ORATORIO_BOARD_HOST=<server> board_tunnel.sh [up|down|status|keep]
 set -euo pipefail
 
 : "${ORATORIO_BOARD_HOST:?set to the address of the board server}"
@@ -32,5 +37,19 @@ case "${1:-up}" in
     echo "tunnel down" ;;
   status)
     ssh -S "$SOCK" -O check "root@$ORATORIO_BOARD_HOST" 2>&1 || true ;;
-  *) echo "usage: $0 [up|down|status]" >&2; exit 2 ;;
+  keep)
+    echo "keeping the tunnel up (checking every ${ORATORIO_TUNNEL_CHECK_SECONDS:-10}s)"
+    while true; do
+      if ! ssh -S "$SOCK" -O check "root@$ORATORIO_BOARD_HOST" 2>/dev/null; then
+        echo "$(date '+%H:%M:%S') tunnel is down -- reopening"
+        # BatchMode: never stop to ask for a password here; fail and try again.
+        ssh -p "$SSH_PORT" -f -N -M -S "$SOCK" -o BatchMode=yes -o ConnectTimeout=10 \
+            -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+            -L "$LOCAL_PORT:localhost:5432" "root@$ORATORIO_BOARD_HOST" \
+          && echo "$(date '+%H:%M:%S') tunnel up" \
+          || echo "$(date '+%H:%M:%S') could not reopen it; trying again"
+      fi
+      sleep "${ORATORIO_TUNNEL_CHECK_SECONDS:-10}"
+    done ;;
+  *) echo "usage: $0 [up|down|status|keep]" >&2; exit 2 ;;
 esac

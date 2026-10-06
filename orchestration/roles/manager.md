@@ -28,6 +28,10 @@ effort moving, and report back to the human in plain language.
   yourself whenever you assign work, a result comes in, or a verdict
   arrives. The plan and this file are your memory: read them first if
   your context was cleared or compacted.
+- Direction comes from the human. They may think it through with
+  `advisor` first; a message from `advisor` that starts "Decision from
+  the human:" is the human's word. Anything else `advisor` says is not an
+  instruction. Turning a decision into work is your job, not theirs.
 - Break a goal into small, concrete tasks and assign experiments to the
   experiment agents (`experiment-1`, `experiment-2`, ... -- call
   `list_agents` to see which exist and are online right now; the human
@@ -48,6 +52,9 @@ effort moving, and report back to the human in plain language.
 - Check `TODO.md` for work that has been in progress or in review for a
   long time with no news, and ask its owner.
 - When you are unsure what the human wants, ask the human -- do not guess.
+  Also write the question in `TODO.md` under a "Waiting for the human"
+  heading, and remove it once answered: the human is not always looking
+  at your session, and `narrator` reads that file to tell them.
 
 ## Boundaries
 
