@@ -96,10 +96,14 @@ class Listener:
     def start_session(self) -> None:
         """Announce the agent and put back anything the previous session
         was handed but never acked -- it is not in the new session's
-        context, so it has to be handed in again."""
+        context, so it has to be handed in again.
+
+        Not when only the listener was restarted and the session lived on
+        (ORCH_SESSION_KEPT is set): what it was handed is still in its
+        context, and handing it all in again would only repeat old work."""
         with db.get_pool().connection() as conn:
             registry.register(conn, self.agent_id, runner=self.runner)
-            requeued = messages.requeue_unacked(conn, self.agent_id)
+            requeued = 0 if os.environ.get("ORCH_SESSION_KEPT") else messages.requeue_unacked(conn, self.agent_id)
             conn.commit()
         if requeued:
             logger.info("agent=%s re-queued %d unacked message(s)", self.agent_id, requeued)
@@ -142,6 +146,8 @@ class Listener:
             self.backlog = bool(self._timeout_notes) or bool(
                 messages.undelivered(conn, self.agent_id, limit=1)
             )
+        if self.backlog and isinstance(self.session, TmuxSession):
+            self.session.nudge_if_held(self.agent_id)
 
     def wants_sweep(self) -> bool:
         """Cheap local check: is there a reason to sweep right now, other
@@ -240,10 +246,11 @@ def main() -> None:
             print(f"ORCH_AGENT_TOKEN rejected: {e}", file=sys.stderr)
             sys.exit(1)
     session: Session | None = None
+    runner = os.environ.get("ORCH_RUNNER", "claude")
     pane, idle_flag = os.environ.get("ORCH_TMUX_PANE"), os.environ.get("ORCH_IDLE_FLAG")
     if pane and idle_flag:
-        session = TmuxSession(pane, Path(idle_flag))
-    asyncio.run(run(Listener(agent_id, os.environ.get("ORCH_RUNNER", "claude"), session)))
+        session = TmuxSession(pane, Path(idle_flag), runner)
+    asyncio.run(run(Listener(agent_id, runner, session)))
 
 
 if __name__ == "__main__":

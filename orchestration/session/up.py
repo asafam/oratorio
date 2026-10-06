@@ -33,6 +33,8 @@ A workspace can be described in a yaml file, in any folder:
         model: opus              # optional: a model for this agent
       experiment-1:
       experiment-2:
+      reviewer:
+        runner: codex            # optional: run it in Codex instead of Claude Code
     model: sonnet                # optional: one model for every agent
     permission_mode: auto        # optional; this is the default
 
@@ -43,6 +45,12 @@ Which model an agent gets -- the most specific thing you said wins: the
 `model` under that agent, then the team's `model:`, then the role file's
 own `model`. `up --model M` puts every agent on M for that run;
 `add <agent> --model M` sets it for that one agent.
+
+Which program an agent runs in (`runner`: claude or codex) is chosen the
+same way: under the agent, then the team's `runner:`, then the role
+file's, else claude. A model setting only counts for agents on the same
+runner it was given for: a team `model: sonnet` leaves the Codex agents
+on Codex's own default model.
 
 Name the file `oratorio.yaml`, or `<anything>.oratorio.yaml` to keep
 several in one folder. `-w NAME` always says which workspace you mean.
@@ -67,6 +75,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -135,6 +144,10 @@ def pick_running_workspace(args) -> None:
     if not running:
         sys.exit("Nothing is running.")
     here = [name for name in workspace_files(Path.cwd()) if name in running]
+    if not here:  # no workspace file here: the workspace whose agents work in this folder
+        cwd = str(Path.cwd().resolve())
+        here = [name for name in running
+                if json.loads((RUN_ROOT / name / "state.json").read_text()).get("workdir") == cwd]
     if len(here) == 1:
         return use_workspace(here[0])
     if len(running) == 1:
@@ -278,7 +291,8 @@ def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
     return meta, brief, token
 
 
-AGENT_SETTINGS = {"model"}
+AGENT_SETTINGS = {"model", "runner"}
+RUNNERS = ("claude", "codex")
 
 
 def parse_agents(entries) -> list[tuple[str, dict]]:
@@ -309,11 +323,58 @@ def parse_agents(entries) -> list[tuple[str, dict]]:
     return agents
 
 
-def model_for(agent_id: str, role_model: str | None, state: dict) -> str:
+def runner_for(agent_id: str, role_runner: str | None, state: dict) -> str:
+    """The program one agent runs in, claude or codex. Chosen like its
+    model: this agent, then the whole team, then the role file."""
+    return (state.get("runners") or {}).get(agent_id) or state.get("runner") or role_runner or "claude"
+
+
+def model_for(agent_id: str, role_model: str | None, state: dict,
+              runner: str = "claude", role_runner: str | None = None) -> str | None:
     """The model one agent runs on. What the user set wins over the role
     file, and the more specific setting wins: this agent, then the whole
-    team."""
-    return (state.get("models") or {}).get(agent_id) or state.get("model") or role_model or "sonnet"
+    team. The team's and the role's model only count if they were given
+    for the runner this agent is on (a Claude model means nothing to
+    Codex). None: Codex picks its own default."""
+    own = (state.get("models") or {}).get(agent_id)
+    team = state.get("model") if (state.get("runner") or "claude") == runner else None
+    role = role_model if (role_runner or "claude") == runner else None
+    return own or team or role or ("sonnet" if runner == "claude" else None)
+
+
+def setup_for(agent_id: str, meta: dict, state: dict) -> tuple[str, str | None]:
+    """(runner, model) for one agent, from its role file's frontmatter and the state."""
+    runner = runner_for(agent_id, meta.get("runner"), state)
+    return runner, model_for(agent_id, meta.get("model"), state, runner, meta.get("runner"))
+
+
+def model_label(runner: str, model: str | None) -> str:
+    """What is shown after an agent's name: `fable`, `codex: gpt-5.5`, `codex`."""
+    if runner == "claude":
+        return model or "sonnet"
+    return f"{runner}: {model}" if model else runner
+
+
+# Claude Code's permission modes as Codex options. `auto` hands approval
+# prompts to Codex's own reviewer, the nearest thing to Claude's auto mode.
+CODEX_PERMISSIONS = {
+    "auto": ["--approve-for-me"],
+    "acceptEdits": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+    "default": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+    "plan": ["--sandbox", "read-only", "--ask-for-approval", "on-request"],
+}
+
+
+def check_runner(runner: str, permission_mode: str) -> None:
+    """Exit with a clear message if this runner can't be started as asked."""
+    if runner not in RUNNERS:
+        sys.exit(f"Unknown runner '{runner}'. Use one of: {', '.join(RUNNERS)}")
+    if runner == "codex":
+        if permission_mode not in CODEX_PERMISSIONS:
+            sys.exit(f"permission_mode '{permission_mode}' has no Codex equivalent here. "
+                     f"For Codex agents use one of: {', '.join(CODEX_PERMISSIONS)}")
+        if not shutil.which("codex"):
+            sys.exit("A Codex agent needs the `codex` command, and it is not on your PATH.")
 
 
 def write_private(path: Path, text: str) -> None:
@@ -353,6 +414,10 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
     idle_flag = RUN_DIR / f"{agent_id}.idle"
     idle_flag.unlink(missing_ok=True)
     Path(str(idle_flag) + ".cleared").unlink(missing_ok=True)
+    instructions = PROTOCOL.format(agent_id=agent_id, workspace=WORKSPACE, mcp=MCP_SERVER_NAME) + brief + "\n"
+    runner, model = setup_for(agent_id, meta, state)
+    if runner == "codex":
+        return codex_command(agent_id, model, instructions, token, state, idle_flag), idle_flag
 
     mcp_config = RUN_DIR / f"{agent_id}.mcp.json"
     write_private(mcp_config, json.dumps({"mcpServers": {MCP_SERVER_NAME: {
@@ -375,13 +440,11 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
     }}, indent=2))
 
     prompt = RUN_DIR / f"{agent_id}.prompt.md"
-    prompt.write_text(
-        PROTOCOL.format(agent_id=agent_id, workspace=WORKSPACE, mcp=MCP_SERVER_NAME) + brief + "\n"
-    )
+    prompt.write_text(instructions)
 
     command = [
         "claude", "-n", agent_id,
-        "--model", model_for(agent_id, meta.get("model"), state),
+        "--model", model,
         # Skip user-level plugins/hooks/MCP servers: an agent needs the
         # board and its role, not everything installed on this machine.
         "--setting-sources", "project",
@@ -392,6 +455,44 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
         "--allowedTools", f"mcp__{MCP_SERVER_NAME}",
     ]
     return shlex.join(command), idle_flag
+
+
+def codex_command(agent_id: str, model: str | None, instructions: str, token: str, state: dict,
+                  idle_flag: Path) -> str:
+    """The same agent, in Codex. Everything is given as `-c` settings on
+    top of the user's own ~/.codex/config.toml, which Codex always loads.
+
+    No hooks: Codex only runs hooks you have trusted by hand. So the idle
+    flag is put there before Codex starts and again by Codex's `notify`
+    at the end of every turn; the listener checks the screen as well
+    (see session/tmux.py). The token is not on the command line, where
+    `ps` would show it: it sits in a private start-up script, and Codex
+    passes it on to the board's MCP server (`env_vars`)."""
+    toml = lambda value: json.dumps(value, ensure_ascii=False)  # noqa: E731 -- JSON strings and lists are TOML
+    server = f"mcp_servers.{MCP_SERVER_NAME}"
+    settings = {
+        f"{server}.command": toml(sys.executable),
+        f"{server}.args": toml([str(REPO / "orchestration" / "mcp" / "server.py")]),
+        f"{server}.env_vars": toml(["ORCH_BOARD_DSN", "ORCH_AGENT_TOKEN"]),
+        f"{server}.default_tools_approval_mode": toml("approve"),  # the board's tools never ask
+        # Codex adds a JSON argument to this command; with `sh -c` it lands in $0, unused.
+        "notify": toml(["sh", "-c", f"touch {shlex.quote(str(idle_flag))}"]),
+        "developer_instructions": toml(instructions),
+        "check_for_update_on_startup": "false",
+    }
+    command = ["codex", *CODEX_PERMISSIONS[state["permission_mode"]]]
+    if model:
+        command += ["--model", model]
+    for key, value in settings.items():
+        command += ["-c", f"{key}={value}"]
+    script = RUN_DIR / f"{agent_id}.codex.sh"
+    write_private(script, "".join([
+        f"export ORCH_BOARD_DSN={shlex.quote(os.environ['ORCH_BOARD_DSN'])}\n",
+        f"export ORCH_AGENT_TOKEN={shlex.quote(token)}\n",
+        f"touch {shlex.quote(str(idle_flag))}\n",
+        f"exec {shlex.join(command)}\n",
+    ]))
+    return f"sh {shlex.quote(str(script))}"
 
 
 # ---------------------------------------------------------------------
@@ -474,14 +575,16 @@ BORDER_FORMAT = " #{?#{@label},#[bold]#{@label}#[default],#{pane_title}} "
 def agent_label(agent_id: str) -> str:
     """How an agent is named on screen: its name and the model it runs on,
     `manager (fable)`."""
-    model = running_agents().get(agent_id, {}).get("ORCH_MODEL")
-    if not model:  # started before the model was written down: what it would get now
+    record = running_agents().get(agent_id, {})
+    if "ORCH_MODEL" in record:
+        runner, model = record.get("ORCH_RUNNER", "claude"), record["ORCH_MODEL"] or None
+    else:  # started before the model was written down: what it would get now
         try:
             path = role_files()[resolve_agent(agent_id, role_files(), set())[1]]
-            model = model_for(agent_id, parse_role_file(path)[0].get("model"), load_state())
+            runner, model = setup_for(agent_id, parse_role_file(path)[0], load_state())
         except ValueError:
             return agent_id
-    return f"{agent_id} ({model})"
+    return f"{agent_id} ({model_label(runner, model)})"
 
 
 def label_pane(pane: str, label: str) -> None:
@@ -521,8 +624,11 @@ def start_agent(conn, agent_id: str, path: Path, state: dict, replace: dict | No
     With `replace` (the running agent's own record, for a restart): the
     new session and listener take the place of the old ones in the same
     panes, so the agent stays where it is on screen."""
+    # Before sync_agent, which replaces the running agent's token.
+    check_runner(setup_for(agent_id, parse_role_file(path)[0], state)[0], state["permission_mode"])
     meta, brief, token = sync_agent(conn, agent_id, path)
     conn.commit()
+    runner, model = setup_for(agent_id, meta, state)
     command, idle_flag = agent_command(agent_id, meta, brief, token, state)
     workdir = state["workdir"]
 
@@ -547,15 +653,14 @@ def start_agent(conn, agent_id: str, path: Path, state: dict, replace: dict | No
         pane = tmux("split-window", "-d", "-t", f"{SESSION}:agents", "-c", workdir,
                     "-P", "-F", "#{pane_id}", command)
     tmux("select-pane", "-t", pane, "-T", agent_id)
-    model = model_for(agent_id, meta.get("model"), state)
-    label_pane(pane, f"{agent_id} ({model})")
+    label_pane(pane, f"{agent_id} ({model_label(runner, model)})")
     retile()
 
     env = {
-        "ORCH_MODEL": model,
+        "ORCH_MODEL": model or "",
         "ORCH_BOARD_DSN": os.environ["ORCH_BOARD_DSN"],
         "ORCH_AGENT_TOKEN": token,
-        "ORCH_RUNNER": "claude",
+        "ORCH_RUNNER": runner,
         "ORCH_TMUX_PANE": pane,
         "ORCH_IDLE_FLAG": str(idle_flag),
     }
@@ -590,13 +695,34 @@ def pass_modified_keys() -> None:
         tmux("set-option", "-as", "terminal-features", "xterm*:extkeys")
 
 
+def keep_tunnel() -> None:
+    """With the board on a remote server (ORATORIO_BOARD_HOST is set):
+    keep the SSH tunnel to it open for as long as the workspace runs, in a
+    pane beside the listeners. Without the tunnel no agent can post or be
+    reached, and on its own it does not come back after a network change."""
+    if not os.environ.get("ORATORIO_BOARD_HOST") or not window_exists("listeners"):
+        return
+    titles = tmux("list-panes", "-t", f"{SESSION}:listeners", "-F", "#{pane_title}").splitlines()
+    if "tunnel" in titles:
+        return
+    script = shlex.quote(str(REPO / "orchestration" / "ops" / "scripts" / "board_tunnel.sh"))
+    host = shlex.quote(os.environ["ORATORIO_BOARD_HOST"])
+    pane = tmux("split-window", "-d", "-t", f"{SESSION}:listeners", "-c", str(REPO), "-P", "-F",
+                "#{pane_id}", f"ORATORIO_BOARD_HOST={host} {script} keep")
+    tmux("select-pane", "-t", pane, "-T", "tunnel")
+    retile()
+
+
 def start_board() -> None:
     """Start the board view as a tile (or, with no tiles left, in a window
-    of its own)."""
+    of its own). If it is already there, start it afresh where it is."""
+    command = f"{shlex.quote(sys.executable)} -m orchestration.watch.board -w {shlex.quote(WORKSPACE)}"
+    if "board" in openable():
+        tmux("respawn-pane", "-k", "-t", openable()["board"], "-c", str(REPO), command)
+        return
     where = (["split-window", "-d", "-t", f"{SESSION}:agents"] if window_exists("agents")
              else ["new-window", "-d", "-t", f"{SESSION}:", "-n", "agents"])
-    board = tmux(*where, "-c", str(REPO), "-P", "-F", "#{pane_id}",
-                 f"{shlex.quote(sys.executable)} -m orchestration.watch.board -w {shlex.quote(WORKSPACE)}")
+    board = tmux(*where, "-c", str(REPO), "-P", "-F", "#{pane_id}", command)
     tmux("select-pane", "-t", board, "-T", f"BOARD: {WORKSPACE}")
     label_pane(board, "board")
     retile()
@@ -651,22 +777,28 @@ def cmd_up(args) -> None:
         wanted = resolve_all(args.only.split(",")) if args.only else in_file
     except ValueError as e:
         sys.exit(str(e))
-    # `--model` is for every agent, so it also replaces the file's per-agent models.
-    models = {} if args.model else {
-        agent_id: settings["model"]
-        for agent_id, (_, settings) in zip(in_file, listed) if settings.get("model")
-    }
+    # `--model` is for every agent, so it also replaces the file's per-agent models
+    # (and `--runner` the per-agent runners).
+    def per_agent(key: str) -> dict[str, str]:
+        return {} if getattr(args, key) else {
+            agent_id: settings[key]
+            for agent_id, (_, settings) in zip(in_file, listed) if settings.get(key)
+        }
 
     state = {
         "name": name,
         "workdir": str(workdir),
         "file": str(file) if file else None,
         "model": args.model or workspace.get("model"),
-        "models": models,
+        "models": per_agent("model"),
+        "runner": args.runner or workspace.get("runner"),
+        "runners": per_agent("runner"),
         "tiles": workspace.get("tiles"),
         "permission_mode": args.permission_mode or workspace.get("permission_mode")
                            or DEFAULT_PERMISSION_MODE,
     }
+    for agent_id, role in wanted.items():  # before anything starts, not halfway through
+        check_runner(setup_for(agent_id, parse_role_file(roles[role])[0], state)[0], state["permission_mode"])
     pool = connect()
     RUN_ROOT.mkdir(exist_ok=True)
     RUN_ROOT.chmod(0o700)
@@ -681,6 +813,7 @@ def cmd_up(args) -> None:
     db.close_pool()
 
     start_board()
+    keep_tunnel()
 
     source = f" from {file.name}" if file and not args.only else ""
     print(f"Started workspace '{name}'{source}: {', '.join(wanted)}")
@@ -701,9 +834,12 @@ def cmd_add(args) -> None:
     if agent_id in running:
         sys.exit(f"'{agent_id}' is already running.")
     state = load_state()
-    if args.model:  # for this agent only; kept, so `save` writes it down
-        state = {**state, "models": {**(state.get("models") or {}), agent_id: args.model}}
-        STATE_FILE.write_text(json.dumps(state, indent=2))
+    if args.runner and not args.model:  # a model of the old runner means nothing to the new one
+        state = {**state, "models": {a: m for a, m in (state.get("models") or {}).items() if a != agent_id}}
+    for key in ("model", "runner"):  # for this agent only; kept, so `save` writes it down
+        if getattr(args, key):
+            state = {**state, f"{key}s": {**(state.get(f"{key}s") or {}), agent_id: getattr(args, key)}}
+    STATE_FILE.write_text(json.dumps(state, indent=2))
     pool = connect()
     with pool.connection() as conn:
         start_agent(conn, agent_id, roles[role], state)
@@ -729,6 +865,12 @@ def cmd_add(args) -> None:
 
 def cmd_restart(args) -> None:
     pick_running_workspace(args)
+    if args.agent == "board" and not args.all:  # the view of the board, not an agent
+        if not session_exists():
+            sys.exit(f"Workspace '{WORKSPACE}' is not running.")
+        start_board()
+        print("Restarted the board view. The board itself (the database) was not touched.")
+        return
     running = running_agents()
     if bool(args.agent) == args.all:
         sys.exit("Say which agent to restart, or --all (not both).")
@@ -738,9 +880,13 @@ def cmd_restart(args) -> None:
                  f"Running: {', '.join(running) or 'nothing'}")
     roles = role_files()
     state = load_state()
-    if args.model:  # kept, so `save` writes it down
-        state = {**state, "models": {**(state.get("models") or {}), **{name: args.model for name in names}}}
-        STATE_FILE.write_text(json.dumps(state, indent=2))
+    if args.runner and not args.model:  # a model of the old runner means nothing to the new one
+        state = {**state, "models": {a: m for a, m in (state.get("models") or {}).items() if a not in names}}
+    for key in ("model", "runner"):  # kept, so `save` writes it down
+        if getattr(args, key):
+            state = {**state, f"{key}s": {**(state.get(f"{key}s") or {}),
+                                          **{name: getattr(args, key) for name in names}}}
+    STATE_FILE.write_text(json.dumps(state, indent=2))
     pool = connect()
     with pool.connection() as conn:
         for name in names:
@@ -795,16 +941,17 @@ def cmd_save(args) -> None:
             target = workdir / f"{WORKSPACE}{WORKSPACE_SUFFIX}"
 
     team = sorted(agents, key=_team_order(role_files()))
-    models = state.get("models") or {}
+    own = {a: {key: state[f"{key}s"][a] for key in ("runner", "model") if a in (state.get(f"{key}s") or {})}
+           for a in team}
     workspace = {
         "name": WORKSPACE,
         "workdir": os.path.relpath(workdir, target.parent),
-        # Names only, unless some agent has a model of its own.
-        "agents": {a: {"model": models[a]} if a in models else {} for a in team}
-                  if any(a in models for a in team) else team,
+        # Names only, unless some agent has a setting of its own.
+        "agents": own if any(own.values()) else team,
     }
-    if state.get("model"):
-        workspace["model"] = state["model"]
+    for key in ("runner", "model"):
+        if state.get(key):
+            workspace[key] = state[key]
     if state.get("tiles"):
         workspace["tiles"] = state["tiles"]
     workspace["permission_mode"] = state["permission_mode"]
@@ -1064,14 +1211,19 @@ def main() -> None:
     p.add_argument("--only", help="comma-separated agents to start (default: the workspace file, else one per role)")
     p.add_argument("--model", help="one model for every agent on this run (default: what the "
                                    "workspace file says, else each role's own)")
+    p.add_argument("--runner", choices=RUNNERS, help="one runner for every agent on this run (default: what "
+                                                      "the workspace file says, else each role's own, else claude)")
     p.add_argument("--permission-mode",
-                   help=f"Claude Code permission mode for the agents (default: {DEFAULT_PERMISSION_MODE})")
+                   help=f"Claude Code permission mode for the agents; Codex agents get the nearest Codex "
+                        f"options (default: {DEFAULT_PERMISSION_MODE})")
     p.set_defaults(run=cmd_up)
 
     p = sub.add_parser("add", parents=[which], help="add one agent to a running workspace")
     p.add_argument("agent", help="a role (experiment -> next free experiment-N) or an exact agent name")
     p.add_argument("--model", help="model for this agent only (default: what the workspace "
                                    "or its role says)")
+    p.add_argument("--runner", choices=RUNNERS, help="run this agent in claude or codex (default: what "
+                                                      "the workspace or its role says, else claude)")
     p.add_argument("--here", action="store_true",
                    help="iTerm2 only: also show it in a new split under the terminal you type this in")
     p.set_defaults(run=cmd_add)
@@ -1080,9 +1232,10 @@ def main() -> None:
                        description="Stop an agent and start it again in the same tile or terminal, with an "
                                    "empty conversation and the current role file, model and settings. "
                                    "Messages it had not finished are handed to it again.")
-    p.add_argument("agent", nargs="?")
+    p.add_argument("agent", nargs="?", help="an agent name, or `board` for the board view")
     p.add_argument("--all", action="store_true", help="restart every agent in the workspace")
     p.add_argument("--model", help="also change its model")
+    p.add_argument("--runner", choices=RUNNERS, help="also change what it runs in: claude or codex")
     p.set_defaults(run=cmd_restart)
 
     p = sub.add_parser("remove", parents=[which], help="close one agent")

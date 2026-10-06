@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from orchestration.session.up import _team_order, carried_settings, model_for, parse_agents, iterm_script, resolve_agent, role_files, tile_order
+from orchestration.session.up import _team_order, carried_settings, model_for, model_label, parse_agents, runner_for, iterm_script, resolve_agent, role_files, tile_order
 
 ROLES = role_files()
 
@@ -48,6 +48,32 @@ def test_an_agents_own_model_wins_over_the_teams():
     state = {"model": "haiku", "models": {"experiment-2": "opus"}}
     assert model_for("experiment-2", "sonnet", state) == "opus"
     assert model_for("experiment-1", "sonnet", state) == "haiku"
+
+
+def test_runner_is_chosen_like_the_model():
+    assert runner_for("reviewer", None, {}) == "claude"
+    assert runner_for("reviewer", "codex", {}) == "codex"
+    assert runner_for("reviewer", None, {"runner": "codex"}) == "codex"
+    assert runner_for("reviewer", "codex", {"runner": "claude", "runners": {"reviewer": "codex"}}) == "codex"
+
+
+def test_a_codex_agent_ignores_models_given_for_claude():
+    # A mixed team: the team's model is for its Claude agents.
+    state = {"model": "opus", "runners": {"reviewer": "codex"}}
+    assert model_for("reviewer", "fable", state, "codex", None) is None  # Codex's own default
+    assert model_for("reviewer", "gpt-5.5", state, "codex", "codex") == "gpt-5.5"
+    assert model_for("reviewer", None, {**state, "models": {"reviewer": "gpt-5.5"}}, "codex") == "gpt-5.5"
+    assert model_for("reviewer", None, {"runner": "codex", "model": "gpt-5.5"}, "codex") == "gpt-5.5"
+
+
+def test_label_says_which_runner():
+    assert model_label("claude", "fable") == "fable"
+    assert model_label("codex", "gpt-5.5") == "codex: gpt-5.5"
+    assert model_label("codex", None) == "codex"
+
+
+def test_agents_can_have_a_runner_of_their_own():
+    assert parse_agents({"reviewer": {"runner": "codex"}}) == [("reviewer", {"runner": "codex"})]
 
 
 def test_agents_can_be_a_plain_list_of_names():

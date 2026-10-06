@@ -37,7 +37,9 @@ terminal. Agents send each other messages through the board and keep
 their own conversation context while they work.
 
 Ships with a small research team as a starting point -- `manager`,
-`experiment` (as many as you want), `reviewer`, `writer` -- and one
+`experiment` (as many as you want), `reviewer`, `writer`, a `narrator`
+you can ask what is going on, and an `advisor` to talk strategy with --
+and one
 command that opens them as tiles in a single terminal window, next to a
 live view of what they are saying to each other. Adapt the role files
 under `orchestration/roles/` to your own project; nothing else in this
@@ -61,7 +63,7 @@ work to the others through the board.
 | `oratorio up` | Starts a workspace. |
 | `oratorio attach` | Opens its tiles. |
 | `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... With `--here` (iTerm2) it also appears in a new split under the terminal you typed it in. |
-| `oratorio restart experiment-2` | Starts that agent afresh in the same tile or terminal: an empty conversation, and the current role file, model and settings. Messages it had not finished are handed to it again. `--all` restarts every agent; `--model opus` also changes its model. |
+| `oratorio restart experiment-2` | Starts that agent afresh in the same tile or terminal: an empty conversation, and the current role file, model and settings. Messages it had not finished are handed to it again. `--all` restarts every agent; `--model opus` also changes its model. `oratorio restart board` restarts the board view. |
 | `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
 | `oratorio open manager` | Shows that one agent (or `board`) alone in the terminal you type it in, so you can arrange agents yourself in your terminal's own splits or tabs. Closing the terminal closes nothing; run it again to get the agent back. |
 | `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board, plus a plain console in the working folder for typing commands. Each split is labelled with the agent and its model, `manager (fable)`. Add `--tab` for a new tab in the current window instead, or `--here` to put the splits under the terminal you typed it in, which stays on top as your console. |
@@ -87,6 +89,8 @@ agents:
     model: opus                # optional: a model for this agent
   experiment-1:
   experiment-2:
+  reviewer:
+    runner: codex              # optional: run it in Codex (GPT) instead of Claude Code
 model: sonnet                  # optional: one model for every other agent
 permission_mode: auto           # optional; this is the default
 ```
@@ -117,7 +121,43 @@ write `TODO.md`, for example) -- nothing stops you, so point them at
 different folders unless you mean it. Two running workspaces cannot
 share a name.
 
-More options for `up`: `--only manager,reviewer`, `--model haiku`,
+### Mixing Claude and Codex agents
+
+Each agent runs in Claude Code unless you say otherwise. `runner: codex`
+runs it in the Codex CLI instead (it must be installed and logged in).
+You can say it in the same places as `model`, and the most specific one
+wins:
+
+- under one agent in the workspace file (as for `reviewer` above),
+- `runner:` at the top of the workspace file, for the whole team,
+- `runner: codex` in a role file, for every agent of that role,
+- `oratorio add reviewer --runner codex`, or
+  `oratorio restart reviewer --runner codex` to switch a running one.
+
+On the board nothing changes: a Codex agent sends and gets messages like
+any other, and its tile reads `reviewer (codex)`.
+
+A model name only counts for the program it was meant for. The team's
+`model: sonnet` does not reach Codex agents; they use Codex's default
+model unless you give them one of their own (`model: gpt-5.5` under the
+agent).
+
+Differences for Codex agents:
+- They load your own `~/.codex/config.toml` (your MCP servers, plugins),
+  since Codex has no way to skip it.
+- Codex's `notify` setting is replaced for them (it tells the listener
+  when a turn ends). No Codex hooks are used, so you are never asked to
+  trust any.
+- `permission_mode` becomes Codex options: `auto` uses
+  `--approve-for-me` (Codex's own reviewer decides, like Claude's auto
+  mode); `acceptEdits` and `default` let it edit the working folder and
+  ask for the rest; `plan` makes it read-only. Other modes are refused.
+  Codex blocks internet use by commands until it is approved (by its
+  reviewer under `auto`, by you otherwise).
+- The listener cannot see a `/new` in a Codex tile. Use
+  `oratorio restart <agent>` instead, which hands it its open messages.
+
+More options for `up`: `--only manager,reviewer`, `--model haiku`, `--runner codex`,
 `--permission-mode MODE`, `--workdir DIR` (look there for workspace
 files instead of the current folder).
 
@@ -211,8 +251,11 @@ It never types while the agent is busy. The agent's own hooks keep an
 "idle" flag file: there while it waits for input, gone while it works.
 The listener hands over one message, then waits for idle before the next.
 
-Known limit: if you have half-typed text sitting in an idle tile when a
-board message arrives, the message is typed on top of it.
+It never types over you either. While there is text of yours in an
+agent's input box, board messages for that agent wait, and you get a
+short note in that tile that one is waiting. Send or clear your text and
+it comes in. (A message that arrives in the instant you type the very
+first letter can still get in ahead of you.)
 
 ### Keeping context under control
 
