@@ -479,6 +479,9 @@ def codex_command(agent_id: str, model: str | None, instructions: str, token: st
         "notify": toml(["sh", "-c", f"touch {shlex.quote(str(idle_flag))}"]),
         "developer_instructions": toml(instructions),
         "check_for_update_on_startup": "false",
+        # Draw in the pane's normal screen, as Claude Code does: in its own
+        # full screen Codex takes the mouse, and the wheel no longer scrolls back.
+        "tui.alternate_screen": toml("never"),
     }
     command = ["codex", *CODEX_PERMISSIONS[state["permission_mode"]]]
     if model:
