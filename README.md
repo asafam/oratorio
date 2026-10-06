@@ -37,13 +37,12 @@ terminal. Agents send each other messages through the board and keep
 their own conversation context while they work.
 
 Ships with a small research team as a starting point -- `manager`,
-`experiment` (as many as you want), `reviewer`, `writer`, a `narrator`
-you can ask what is going on, and an `advisor` to talk strategy with --
-and one
-command that opens them as tiles in a single terminal window, next to a
-live view of what they are saying to each other. Adapt the role files
-under `orchestration/roles/` to your own project; nothing else in this
-repo is specific to that team.
+`experiment` (as many as you want), `reviewer`, `writer`, an `advisor`
+to talk strategy with, and a `critic` (devil's advocate) to call at big
+moments -- and one command that opens them as tiles in a single
+terminal window, next to a live view of what they are saying to each
+other. Adapt the role files under `orchestration/roles/` to your own
+project; nothing else in this repo is specific to that team.
 
 ## Quick start
 
