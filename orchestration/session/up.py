@@ -15,6 +15,7 @@ board messages into its pane whenever it is idle.
     oratorio open --all [--tab|--here] [-w NAME]       iTerm2: one split each, in a new window,
                                                        a new tab, or under this terminal
     oratorio status                                    every running workspace
+    oratorio plan [-w NAME]                            what is done, in progress, pending
     oratorio down [-w NAME | --all]
 
 (`oratorio` is bin/oratorio; or run this file with the venv's python.)
@@ -733,19 +734,36 @@ def keep_tunnel() -> None:
     retile()
 
 
-def start_board() -> None:
-    """Start the board view as a tile (or, with no tiles left, in a window
-    of its own). If it is already there, start it afresh where it is."""
-    command = f"{shlex.quote(sys.executable)} -m orchestration.watch.board -w {shlex.quote(WORKSPACE)}"
-    if "board" in openable():
-        tmux("respawn-pane", "-k", "-t", openable()["board"], "-c", str(REPO), command)
+# The views beside the agents: name -> the start of their pane title.
+VIEWS = {"board": "BOARD:", "plan": "PLAN:"}
+
+
+def plan_file() -> Path:
+    return Path(load_state()["workdir"]) / "TODO.md"
+
+
+def start_view(name: str) -> None:
+    """Start a view (`board`: the message feed; `plan`: TODO.md) as a tile
+    (or, with no tiles left, in a window of its own). If it is already
+    there, start it afresh where it is."""
+    py = shlex.quote(sys.executable)
+    command = {
+        "board": f"{py} -m orchestration.watch.board -w {shlex.quote(WORKSPACE)}",
+        "plan": f"{py} -m orchestration.watch.plan {shlex.quote(str(plan_file()))} --title {shlex.quote(WORKSPACE)}",
+    }[name]
+    if name in openable():
+        tmux("respawn-pane", "-k", "-t", openable()[name], "-c", str(REPO), command)
         return
     where = (["split-window", "-d", "-t", f"{SESSION}:agents"] if window_exists("agents")
              else ["new-window", "-d", "-t", f"{SESSION}:", "-n", "agents"])
-    board = tmux(*where, "-c", str(REPO), "-P", "-F", "#{pane_id}", command)
-    tmux("select-pane", "-t", board, "-T", f"BOARD: {WORKSPACE}")
-    label_pane(board, "board")
+    pane = tmux(*where, "-c", str(REPO), "-P", "-F", "#{pane_id}", command)
+    tmux("select-pane", "-t", pane, "-T", f"{VIEWS[name]} {WORKSPACE}")
+    label_pane(pane, name)
     retile()
+
+
+def start_board() -> None:
+    start_view("board")
 
 
 def connect():
@@ -843,6 +861,7 @@ def cmd_up(args) -> None:
     db.close_pool()
 
     start_board()
+    start_view("plan")
     keep_tunnel()
 
     source = (f" from team '{team}'" if team and not args.only
@@ -896,11 +915,12 @@ def cmd_add(args) -> None:
 
 def cmd_restart(args) -> None:
     pick_running_workspace(args)
-    if args.agent == "board" and not args.all:  # the view of the board, not an agent
+    if args.agent in VIEWS and not args.all:  # a view, not an agent
         if not session_exists():
             sys.exit(f"Workspace '{WORKSPACE}' is not running.")
-        start_board()
-        print("Restarted the board view. The board itself (the database) was not touched.")
+        start_view(args.agent)
+        print(f"Restarted the {args.agent} view." + (" The board itself (the database) was not touched."
+                                                     if args.agent == "board" else ""))
         return
     running = running_agents()
     if bool(args.agent) == args.all:
@@ -1018,6 +1038,13 @@ def cmd_tile(args) -> None:
     print(f"Tiles, row by row: {', '.join(order)}" + ("" if args.agents else "  (automatic)"))
 
 
+def cmd_plan(args) -> None:
+    """Print the workspace's plan once, here."""
+    pick_running_workspace(args)
+    from orchestration.watch import plan
+    print(plan.render(plan_file(), WORKSPACE, width=shutil.get_terminal_size().columns))
+
+
 def cmd_status(args) -> None:
     running = running_workspaces()
     if not running:
@@ -1049,12 +1076,14 @@ def cmd_attach(args) -> None:
 
 
 def openable() -> dict[str, str]:
-    """What `oratorio open` can show: each running agent, and `board` -> its pane."""
+    """What `oratorio open` can show: each running agent, and each view
+    (`board`, `plan`) -> its pane."""
     panes = {a: env["ORCH_TMUX_PANE"] for a, env in running_agents().items()}
     for line in tmux("list-panes", "-s", "-t", SESSION, "-F", "#{pane_id} #{pane_title}").splitlines():
         pane, _, title = line.partition(" ")
-        if title.startswith("BOARD:"):
-            panes["board"] = pane
+        for name, prefix in VIEWS.items():
+            if title.startswith(prefix):
+                panes[name] = pane
     return panes
 
 
@@ -1071,7 +1100,7 @@ def own_window(name: str, pane: str) -> str:
     tmux("set-window-option", "-t", window, "window-size", "smallest")
     # Its name along the top edge, so it is clear who is in which terminal.
     tmux("set-window-option", "-t", window, "pane-border-status", "top")
-    label_pane(pane, name if name == "board" else agent_label(name))
+    label_pane(pane, name if name in VIEWS else agent_label(name))
     tmux("set-window-option", "-t", window, "pane-border-format", BORDER_FORMAT)
     return window
 
@@ -1140,10 +1169,10 @@ def iterm_script(commands: list[str], where: str = "window", bounds: str | None 
 
 
 def open_all_in_iterm(panes: dict[str, str], where: str = "window") -> None:
-    agents = [a for a in panes if a != "board"]
+    agents = [a for a in panes if a not in VIEWS]
     tiles = len(panes) + (where != "here")  # the console is a tile too
     order = tile_order(agents, role_files(), tiles, load_state().get("tiles"))
-    order += ["board"] if "board" in panes else []
+    order += [view for view in VIEWS if view in panes]
     for name in order:  # one at a time, here -- the terminals below then only have to look
         own_window(name, panes[name])
     retile()
@@ -1172,9 +1201,10 @@ def cmd_open(args) -> None:
     if not session_exists():
         sys.exit(f"Workspace '{WORKSPACE}' is not running.")
     panes = openable()
-    if "board" not in panes:  # it was closed, or stopped: bring it back
-        start_board()
-        panes = openable()
+    for view in VIEWS:
+        if view not in panes:  # it was closed, or stopped (or is new): bring it back
+            start_view(view)
+            panes = openable()
     if args.tab and args.here:
         sys.exit("Use --tab or --here, not both.")
     if args.all:
@@ -1205,7 +1235,7 @@ def cmd_open(args) -> None:
                        # The terminal's own title (tab, or iTerm2's bar over each split).
                        "set-option", "-t", view, "set-titles", "on", ";",
                        "set-option", "-t", view, "set-titles-string",
-                       f"{args.agent if args.agent == 'board' else agent_label(args.agent)} - {WORKSPACE}", ";",
+                       f"{args.agent if args.agent in VIEWS else agent_label(args.agent)} - {WORKSPACE}", ";",
                        "select-window", "-t", f"{view}:{window}"])
 
 
@@ -1271,7 +1301,7 @@ def main() -> None:
                        description="Stop an agent and start it again in the same tile or terminal, with an "
                                    "empty conversation and the current role file, model and settings. "
                                    "Messages it had not finished are handed to it again.")
-    p.add_argument("agent", nargs="?", help="an agent name, or `board` for the board view")
+    p.add_argument("agent", nargs="?", help="an agent name, or `board` / `plan` for those views")
     p.add_argument("--all", action="store_true", help="restart every agent in the workspace")
     p.add_argument("--model", help="also change its model")
     p.add_argument("--runner", choices=RUNNERS, help="also change what it runs in: claude or codex")
@@ -1294,7 +1324,7 @@ def main() -> None:
                                    "arranging agents yourself in your terminal's own splits or tabs. The "
                                    "agent leaves the tiles and keeps running if you close the terminal; "
                                    "run this again to get it back.")
-    p.add_argument("agent", nargs="?", help="an agent name, or `board`")
+    p.add_argument("agent", nargs="?", help="an agent name, or `board` or `plan`")
     p.add_argument("--all", action="store_true",
                    help="iTerm2 only: open a new window with a split for every agent and the board")
     p.add_argument("--tab", action="store_true",
@@ -1304,6 +1334,8 @@ def main() -> None:
                         "as your console")
     p.set_defaults(run=cmd_open)
     sub.add_parser("status", help="every running workspace").set_defaults(run=cmd_status)
+    sub.add_parser("plan", parents=[which], help="what is done, in progress and pending (from TODO.md)"
+                   ).set_defaults(run=cmd_plan)
     p = sub.add_parser("down", parents=[which], help="stop a workspace")
     p.add_argument("--all", action="store_true", help="stop every running workspace")
     p.set_defaults(run=cmd_down)

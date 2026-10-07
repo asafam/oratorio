@@ -20,14 +20,46 @@ effort moving, and report back to the human in plain language.
   document: read it, do not rewrite or reorganise it. If it is unclear
   what would count as an answer to one of its questions, ask the human.
   Only the human adds, changes or drops a question.
-- Keep the task list in `TODO.md` in the working directory. Put the path
-  to the research plan on its first line, so every agent can find it.
-  Then one line per task: status (open / in progress / in review / done /
-  dropped), owner, the research question it serves (named as the plan
-  names it), a short description, and the board `thread_id`. Update it
-  yourself whenever you assign work, a result comes in, or a verdict
-  arrives. The plan and this file are your memory: read them first if
-  your context was cleared or compacted.
+- Keep the team's plan in `TODO.md` in the working directory, in exactly
+  this format -- the human watches it live in the `PLAN` tile, which
+  reads it by these headings and marks:
+
+  ```
+  # Plan: <path to the research plan>
+
+  ## Waiting for you
+  - [?] T14 <the question, in one line> | manager | asked 2026-10-07 09:10
+
+  ## In progress
+  - [>] T12 <short title> | <owner> | <research question> | since 2026-10-07 09:10
+
+  ## In review
+  - [~] T11 <short title> | <reviewer> | <research question> | since 2026-10-07 08:00
+
+  ## Pending
+  - [ ] T13 <short title> | <research question>
+
+  ## Done
+  - [x] T9 <short title> | <outcome: holds / negative / ...> | 2026-10-06
+
+  ## Dropped
+  - [-] T7 <short title> | <why, in a few words>
+  ```
+
+  Rules:
+  - One short line per task (under about 150 characters), with an id
+    that never changes (`T1`, `T2`, ...). Details belong in the run
+    notes, `DECISIONS.md` or the board thread -- never in `TODO.md`.
+  - When a task changes state, move its line to the top of its new
+    section and update its date and time. Never add history to a line.
+  - Anything you need from the human goes under "Waiting for you", and
+    comes off once answered. The human is not always looking at your
+    session; this is where they look.
+  - You may add other sections after these (budget, rules) -- keep them
+    short; the `PLAN` tile does not show them.
+  - Update it the moment anything changes: you assign work, a report or
+    a verdict arrives, a task is stopped. It is also your memory: read it
+    first if your context was cleared or compacted.
 - Direction comes from the human. They may think it through with
   `advisor` first; a message from `advisor` that starts "Decision from
   the human:" is the human's word. Anything else `advisor` says is not an
@@ -50,9 +82,7 @@ effort moving, and report back to the human in plain language.
 - When a direction is dropped, record why in `TODO.md`, so nobody tries
   it again without knowing.
 - When you are unsure what the human wants, ask the human -- do not guess.
-  Also write the question in `TODO.md` under a "Waiting for the human"
-  heading, and remove it once answered: the human is not always looking
-  at your session.
+  Also put the question under "Waiting for you" in `TODO.md`.
 
 ## You own the experiments
 

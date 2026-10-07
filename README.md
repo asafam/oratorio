@@ -52,8 +52,9 @@ oratorio up                                      # bin/oratorio in this repo
 oratorio attach
 ```
 
-You get one tile per agent plus a `BOARD` tile, laid out in a grid for
-you. Click a tile to type in it. Give your goal to `manager`; it hands
+You get one tile per agent plus a `BOARD` tile (what they say to each
+other) and a `PLAN` tile (what is done, in progress and pending), laid
+out in a grid for you. Click a tile to type in it. Give your goal to `manager`; it hands
 work to the others through the board. For a software project, start
 the development team instead: `oratorio up --team dev`, and give your
 goal to `lead`.
@@ -63,12 +64,13 @@ goal to `lead`.
 | `oratorio up` | Starts a workspace. |
 | `oratorio attach` | Opens its tiles. |
 | `oratorio add experiment` | Adds an agent as a new tile. Roles that can have several get a running number: `experiment-1`, then `experiment-2`, ... With `--here` (iTerm2) it also appears in a new split under the terminal you typed it in. |
-| `oratorio restart experiment-2` | Starts that agent afresh in the same tile or terminal: an empty conversation, and the current role file, model and settings. Messages it had not finished are handed to it again. `--all` restarts every agent; `--model opus` also changes its model. `oratorio restart board` restarts the board view. |
+| `oratorio restart experiment-2` | Starts that agent afresh in the same tile or terminal: an empty conversation, and the current role file, model and settings. Messages it had not finished are handed to it again. `--all` restarts every agent; `--model opus` also changes its model. `oratorio restart board` (or `plan`) restarts that view. |
 | `oratorio remove experiment-2` | Closes that agent. Messages sent to it wait until it is added again. |
 | `oratorio open manager` | Shows that one agent (or `board`) alone in the terminal you type it in, so you can arrange agents yourself in your terminal's own splits or tabs. Closing the terminal closes nothing; run it again to get the agent back. |
 | `oratorio open --all` | iTerm2 only: opens a new window with a split for every agent and the board, plus a plain console in the working folder for typing commands. Each split is labelled with the agent and its model, `manager (fable)`. Add `--tab` for a new tab in the current window instead, or `--here` to put the splits under the terminal you typed it in, which stays on top as your console. |
 | `oratorio tile manager experiment-1` | Arranges the tiles in that order, row by row; agents you leave out follow. With no names: the automatic order, which keeps numbered agents side by side. Also brings back any agent you opened on its own. |
 | `oratorio save` | Writes the running team to the workspace's yaml file. |
+| `oratorio plan` | Prints the plan once: what is waiting for you, in progress, in review, pending and done. |
 | `oratorio status` | Every running workspace, and what can be added to each. |
 | `oratorio down` | Stops a workspace (`--all` for every one). |
 
@@ -187,7 +189,7 @@ change the team while it runs.
 | Team | Agents | You talk to |
 |---|---|---|
 | `research` | `manager` runs the effort; `experiment-1`, `-2` run experiments; `reviewer` checks every result; `writer` writes the paper; `advisor` is your partner on strategy; `critic` is the devil's advocate, called only at big moments (a new direction, a main claim, a paper draft -- for a draft it runs a five-seat review panel and writes one report) | `manager`, `advisor` |
-| `dev` | `lead` plans, assigns and merges; `developer-1`, `-2` write the code, each on its own branch in its own git worktree; `code-reviewer` reviews every change; `tester` tests every change. A change is merged only after both pass it. | `lead` |
+| `dev` | `lead` plans, assigns and merges; `architect` owns the design and is asked before big tasks; `developer-1`, `-2` write the code, each on its own branch in its own git worktree; `code-reviewer` reviews every change; `tester` tests every change. A change is merged only after both pass it. | `lead` |
 
 In both teams Claude does the work, and Codex (a second model family)
 checks and challenges it: `reviewer`, `advisor` and `critic`, and
@@ -317,6 +319,29 @@ being needed often, or from losing work:
 | `orchestration/watch/` | The board view: a live feed of every message, for you to watch. |
 | `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script. |
 | `orchestration/ops/systemd/` | Optional service files (listener, tunnel for `server_http.py`). |
+
+## Watching the plan
+
+The `PLAN` tile shows the team's `TODO.md` -- the one place to see what
+has been done, what is being done, and what is still to do:
+
+```
+PLAN  perpetua   TODO.md changed 2m ago
+Waiting for you 1  ·  In progress 2  ·  Pending 1  ·  Done 1  ·  Dropped 1
+
+WAITING FOR YOU
+  T14 Use bAbI or CLUTRR for the long-chain test?  manager  3h
+IN PROGRESS
+  T12 Baseline on bAbI  experiment-1 · Q1  4h  ⚠ no news
+  T15 Ablation without the noise filter  experiment-2 · Q2  20m
+```
+
+`manager` (or `lead`) keeps the file in a fixed format, one short line
+per task, newest first, sorted under `## Waiting for you`, `## In progress`, `## In
+review`, `## Pending`, `## Done` and `## Dropped` (see its role file).
+Work that has sat in progress or in review for more than 3 hours is
+flagged. The tile redraws when the file changes; it only reads the
+file, so it costs no tokens. `oratorio plan` prints it once.
 
 ## Watching the agents
 
