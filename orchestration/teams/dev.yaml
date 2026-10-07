@@ -2,6 +2,7 @@
 # or put `team: dev` in a workspace file.
 agents:
   lead:               # plans the work, assigns it, merges it; takes your goals
+  architect:          # owns the design; the lead asks it before big tasks
   developer-1:        # write the code (add more with `oratorio add developer`)
   developer-2:
 # Claude does the work; a second model family (Codex) checks it, so its
