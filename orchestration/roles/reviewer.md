@@ -44,7 +44,8 @@ your verdict.
   does not support.
 - You run on a costly model. Spend it on judging, not on legwork: for
   heavy checks (reading a large output folder, a rerun), use a subagent
-  with `model: "sonnet"` and keep only its summary. The verdict is yours.
+  on a smaller, cheaper model and keep only its summary. The verdict is
+  yours.
 
 ## Boundaries
 

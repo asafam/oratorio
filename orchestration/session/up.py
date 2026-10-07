@@ -4,7 +4,7 @@ the board view. Each agent is an ordinary interactive Claude Code session
 you can watch and type in; a listener per agent (second tmux window) types
 board messages into its pane whenever it is idle.
 
-    oratorio up [-w NAME] [--only a,b] [--model M]    start a workspace
+    oratorio up [-w NAME] [--team T] [--only a,b]     start a workspace
     oratorio add <agent> [-w NAME]                     add one while running
     oratorio remove <agent> [-w NAME]                  close one
     oratorio restart <agent>|--all [-w NAME]           start it afresh, where it is
@@ -28,7 +28,8 @@ A workspace can be described in a yaml file, in any folder:
 
     name: thesis
     workdir: .                   # where its agents work; default: the file's folder
-    agents:
+    team: research               # optional: a ready-made team (orchestration/teams/)
+    agents:                      # optional: the agents themselves (wins over team)
       manager:
         model: opus              # optional: a model for this agent
       experiment-1:
@@ -89,6 +90,8 @@ from orchestration.board_core import auth, db, registry  # noqa: E402
 from orchestration.roles.sync_roles import ROLES_DIR, git_blob_sha, parse_role_file  # noqa: E402
 
 RUN_ROOT = REPO / ".oratorio"
+TEAMS_DIR = REPO / "orchestration" / "teams"
+DEFAULT_TEAM = "research"
 WORKSPACE_FILE = "oratorio.yaml"
 WORKSPACE_SUFFIX = ".oratorio.yaml"
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,40}")
@@ -261,6 +264,20 @@ def resolve_agent(name: str, roles: dict[str, Path], taken: set[str]) -> tuple[s
     if numbered and numbered.group(1) in roles and is_multiple(roles[numbered.group(1)]):
         return name, numbered.group(1)
     raise ValueError(f"No role for '{name}'. Roles: {', '.join(roles)}")
+
+
+def team_files() -> dict[str, Path]:
+    """team name -> its file in orchestration/teams/."""
+    return {p.stem: p for p in sorted(TEAMS_DIR.glob("*.yaml"))}
+
+
+def team_agents(name: str) -> list[tuple[str, dict]]:
+    """The agents of a ready-made team, as (name, settings) pairs. Raises
+    ValueError for a team that does not exist."""
+    teams = team_files()
+    if name not in teams:
+        raise ValueError(f"No team '{name}'. Teams: {', '.join(teams) or '(none)'}")
+    return parse_agents((yaml.safe_load(teams[name].read_text()) or {}).get("agents") or [])
 
 
 def sync_agent(conn, agent_id: str, path: Path) -> tuple[dict, str, str]:
@@ -773,9 +790,18 @@ def cmd_up(args) -> None:
             team[agent_id] = role
         return team
 
-    # Command line wins over the workspace file, which wins over "one per role".
+    # Command line wins over the workspace file. An `agents:` list wins over
+    # a `team:`; with neither, the default team (or, without it, one per role).
+    team = args.team or (None if workspace.get("agents") else workspace.get("team"))
+    if not team and not workspace.get("agents") and DEFAULT_TEAM in team_files():
+        team = DEFAULT_TEAM
     try:
-        listed = parse_agents(workspace["agents"]) if workspace.get("agents") else [(r, {}) for r in roles]
+        if team:
+            listed = team_agents(team)
+        elif workspace.get("agents"):
+            listed = parse_agents(workspace["agents"])
+        else:
+            listed = [(r, {}) for r in roles]
         in_file = resolve_all(name for name, _ in listed)
         wanted = resolve_all(args.only.split(",")) if args.only else in_file
     except ValueError as e:
@@ -792,6 +818,7 @@ def cmd_up(args) -> None:
         "name": name,
         "workdir": str(workdir),
         "file": str(file) if file else None,
+        "team": team or workspace.get("team"),
         "model": args.model or workspace.get("model"),
         "models": per_agent("model"),
         "runner": args.runner or workspace.get("runner"),
@@ -818,7 +845,8 @@ def cmd_up(args) -> None:
     start_board()
     keep_tunnel()
 
-    source = f" from {file.name}" if file and not args.only else ""
+    source = (f" from team '{team}'" if team and not args.only
+              else f" from {file.name}" if file and not args.only else "")
     print(f"Started workspace '{name}'{source}: {', '.join(wanted)}")
     print(f"Working folder: {workdir}")
     print(f"Open it:  oratorio attach -w {name}")
@@ -949,6 +977,7 @@ def cmd_save(args) -> None:
     workspace = {
         "name": WORKSPACE,
         "workdir": os.path.relpath(workdir, target.parent),
+        **({"team": state["team"]} if state.get("team") else {}),
         # Names only, unless some agent has a setting of its own.
         "agents": own if any(own.values()) else team,
     }
@@ -1000,7 +1029,12 @@ def cmd_status(args) -> None:
         agents = running_agents()
         print(f"{name}   ({load_state().get('workdir')})")
         print(f"  running: {', '.join(agents) or '(no agents)'}")
-        addable = [r for r, path in roles.items() if is_multiple(path) or r not in agents]
+        team = load_state().get("team")
+        try:  # the workspace's own team first; any role can still be added by name
+            in_team = {resolve_agent(a, roles, set())[1] for a, _ in team_agents(team)} if team else set(roles)
+        except ValueError:
+            in_team = set(roles)
+        addable = [r for r, path in roles.items() if r in in_team and (is_multiple(path) or r not in agents)]
         if addable:
             print(f"  can add: {', '.join(addable)}")
 
@@ -1211,7 +1245,9 @@ def main() -> None:
                        description="Start a workspace. Without -w: the only workspace file in the folder, "
                                    "or, with none, a workspace named after the folder.")
     p.add_argument("--workdir", metavar="DIR", help="folder to look in for workspace files (default: current)")
-    p.add_argument("--only", help="comma-separated agents to start (default: the workspace file, else one per role)")
+    p.add_argument("--team", help=f"a ready-made team from orchestration/teams/ (research, dev, ...); "
+                                  f"default: the workspace file, else {DEFAULT_TEAM}")
+    p.add_argument("--only", help="comma-separated agents to start (default: the team or workspace file)")
     p.add_argument("--model", help="one model for every agent on this run (default: what the "
                                    "workspace file says, else each role's own)")
     p.add_argument("--runner", choices=RUNNERS, help="one runner for every agent on this run (default: what "

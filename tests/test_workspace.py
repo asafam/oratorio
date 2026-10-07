@@ -150,3 +150,25 @@ def test_agents_take_over_auto_mode_settings_and_the_status_line_only_when_asked
     assert carried_settings(True, mine) == {
         "skipAutoPermissionPrompt": True, "statusLine": {"type": "command", "command": "x.sh"}}
     assert carried_settings(True, tmp_path / "missing.json") == {}
+
+
+def test_every_ready_made_team_names_real_roles():
+    from orchestration.session.up import team_agents, team_files
+    assert {"research", "dev"} <= set(team_files())
+    for team in team_files():
+        taken: set[str] = set()
+        for name, _ in team_agents(team):
+            taken.add(resolve_agent(name, ROLES, taken)[0])  # raises for an unknown role
+
+
+def test_in_both_teams_codex_checks_what_claude_does():
+    from orchestration.session.up import team_agents
+    runners = {team: {a: s.get("runner", "claude") for a, s in team_agents(team)} for team in ("research", "dev")}
+    assert runners["research"]["manager"] == "claude" and runners["research"]["critic"] == "codex"
+    assert runners["dev"]["developer-1"] == "claude" and runners["dev"]["code-reviewer"] == "codex"
+
+
+def test_an_unknown_team_is_refused():
+    from orchestration.session.up import team_agents
+    with pytest.raises(ValueError):
+        team_agents("nobody")

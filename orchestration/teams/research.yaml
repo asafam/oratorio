@@ -1,0 +1,16 @@
+# A research team. Start it with `oratorio up --team research`, or put
+# `team: research` in a workspace file. This is also the team you get
+# when a workspace says nothing about its agents.
+agents:
+  manager:            # runs the effort; takes your goals
+  experiment-1:       # run experiments (add more with `oratorio add experiment`)
+  experiment-2:
+# Claude does the work; a second model family (Codex) checks and
+# challenges it, so its blind spots are not the same as the workers'.
+  reviewer:           # checks every result before it counts
+    runner: codex
+  writer:             # writes the paper from results that hold
+  advisor:            # your partner on strategy; talk to it directly
+    runner: codex
+  critic:             # devil's advocate, called only at big moments
+    runner: codex

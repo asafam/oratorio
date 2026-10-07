@@ -36,13 +36,12 @@ work together. Each agent is a normal, long-lived session in its own
 terminal. Agents send each other messages through the board and keep
 their own conversation context while they work.
 
-Ships with a small research team as a starting point -- `manager`,
-`experiment` (as many as you want), `reviewer`, `writer`, an `advisor`
-to talk strategy with, and a `critic` (devil's advocate) to call at big
-moments -- and one command that opens them as tiles in a single
-terminal window, next to a live view of what they are saying to each
-other. Adapt the role files under `orchestration/roles/` to your own
-project; nothing else in this repo is specific to that team.
+Ships with two ready-made teams -- one for research, one for software
+development (see [Teams](#teams)) -- and one command that opens them as
+tiles in a single terminal window, next to a live view of what they are
+saying to each other. In both, Claude does the work and Codex checks it.
+Adapt the role and team files under `orchestration/` to your own
+project; nothing else in this repo is specific to those teams.
 
 ## Quick start
 
@@ -55,7 +54,9 @@ oratorio attach
 
 You get one tile per agent plus a `BOARD` tile, laid out in a grid for
 you. Click a tile to type in it. Give your goal to `manager`; it hands
-work to the others through the board.
+work to the others through the board. For a software project, start
+the development team instead: `oratorio up --team dev`, and give your
+goal to `lead`.
 
 | Command | What it does |
 |---|---|
@@ -109,7 +110,7 @@ oratorio status
 
 Leaving `-w` out is a shortcut, not a rule:
 - `up` uses the folder's only workspace file; with no file at all, it
-  names the workspace after the folder and starts one agent per role.
+  names the workspace after the folder and starts the research team.
 - The other commands use the workspace of the folder you are in if it is
   running, or the only one that is running.
 
@@ -156,7 +157,7 @@ Differences for Codex agents:
 - The listener cannot see a `/new` in a Codex tile. Use
   `oratorio restart <agent>` instead, which hands it its open messages.
 
-More options for `up`: `--only manager,reviewer`, `--model haiku`, `--runner codex`,
+More options for `up`: `--team dev`, `--only manager,reviewer`, `--model haiku`, `--runner codex`,
 `--permission-mode MODE`, `--workdir DIR` (look there for workspace
 files instead of the current folder).
 
@@ -175,12 +176,44 @@ files instead of the current folder).
 - In iTerm2, `tmux -CC attach -t oratorio-<name>` shows the tiles as
   native iTerm2 splits.
 
+### Teams
+
+A team is a ready-made list of agents, in `orchestration/teams/`. Start
+one with `oratorio up --team NAME`, or put `team: NAME` in a workspace
+file. An `agents:` list in the workspace file wins over its `team:`;
+with neither, you get `research`. Either way, `add` and `remove` still
+change the team while it runs.
+
+| Team | Agents | You talk to |
+|---|---|---|
+| `research` | `manager` runs the effort; `experiment-1`, `-2` run experiments; `reviewer` checks every result; `writer` writes the paper; `advisor` is your partner on strategy; `critic` is the devil's advocate, called only at big moments (a new direction, a main claim, a paper draft -- for a draft it runs a five-seat review panel and writes one report) | `manager`, `advisor` |
+| `dev` | `lead` plans, assigns and merges; `developer-1`, `-2` write the code, each on its own branch in its own git worktree; `code-reviewer` reviews every change; `tester` tests every change. A change is merged only after both pass it. | `lead` |
+
+In both teams Claude does the work, and Codex (a second model family)
+checks and challenges it: `reviewer`, `advisor` and `critic`, and
+`code-reviewer` and `tester`. Critics give verdicts, never orders, and
+a disagreement goes back and forth once before it comes to you.
+
+A team file is the `agents:` part of a workspace file:
+
+```yaml
+# orchestration/teams/dev.yaml
+agents:
+  lead:
+  developer-1:
+  developer-2:
+  code-reviewer:
+    runner: codex
+  tester:
+    runner: codex
+```
+
 ### Roles
 
 Each file in `orchestration/roles/` is one role: a few settings on top
-(`model`, `topics`, `status_line`, ...) and a plain-language brief below. `multiple:
-true` lets a role run as several numbered agents; `{agent_id}` in the
-brief is replaced with each agent's own id.
+(`model`, `runner`, `topics`, `status_line`, ...) and a plain-language
+brief below. `multiple: true` lets a role run as several numbered
+agents; `{agent_id}` in the brief is replaced with each agent's own id.
 
 ## How it works
 

@@ -55,7 +55,7 @@ you. You work only when the human talks to you.
   one clear message that starts "Decision from the human:" -- what
   changes, and why. How to carry it out is `manager`'s business.
 - For heavy reading (many run notes, papers, a long stretch of the
-  board), use a subagent with `model: "sonnet"` and keep only its
+  board), use a subagent on a smaller, cheaper model and keep only its
   summary. You run on the most capable model; spend it on thinking.
 
 ## Boundaries

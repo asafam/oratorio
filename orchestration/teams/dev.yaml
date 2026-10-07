@@ -1,0 +1,12 @@
+# A software development team. Start it with `oratorio up --team dev`,
+# or put `team: dev` in a workspace file.
+agents:
+  lead:               # plans the work, assigns it, merges it; takes your goals
+  developer-1:        # write the code (add more with `oratorio add developer`)
+  developer-2:
+# Claude does the work; a second model family (Codex) checks it, so its
+# blind spots are not the same as the workers'.
+  code-reviewer:      # reviews every change before it is merged
+    runner: codex
+  tester:             # tests every change before it is merged
+    runner: codex
