@@ -51,3 +51,12 @@ def test_long_paragraph_lines_are_called_out(tmp_path):
 
 def test_no_file_yet(tmp_path):
     assert "No TODO.md yet" in render(tmp_path / "TODO.md", "x")
+
+
+def test_a_short_tile_keeps_the_top_and_cuts_the_bottom(tmp_path):
+    todo = tmp_path / "TODO.md"
+    todo.write_text(TODO.replace("## Done\n", "## Done\n" + "\n".join(
+        f"- [x] T{n} old work | holds | 2026-10-01" for n in range(100, 140)) + "\n"))
+    screen = render(todo, "x", now=NOW, height=8).splitlines()
+    assert len(screen) == 8
+    assert screen[0].startswith("PLAN") and "make this split taller" in screen[-1]

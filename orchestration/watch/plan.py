@@ -43,6 +43,7 @@ import os
 import re
 import shutil
 import sys
+import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
@@ -118,7 +119,42 @@ def _fit(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(width - 1, 0)] + "…"
 
 
-def render(path: Path, title: str, now: datetime | None = None, width: int = 100) -> str:
+def task_line(title: str, fields: list[str], age: str, stale: bool, width: int) -> str:
+    """One task on one line. The title comes first and gets the room it
+    needs; then the age and the flag; the other fields (owner first) fill
+    what is left, and are the first to go in a narrow tile."""
+    flag = ("⚠ no news" if width >= 90 else "⚠") if stale else ""
+    end = "  ".join(x for x in (age, flag) if x)
+    avail = width - 2 - (len(end) + 2 if end else 0)
+    if len(title) > avail:  # too long for one line: wrap it (up to 3 lines), and drop the other fields
+        wrapped = textwrap.wrap(title, max(avail, 10), subsequent_indent="  ")
+        if len(wrapped) > 3:
+            wrapped = wrapped[:3]
+            wrapped[2] = _fit(wrapped[2], max(avail, 10) - 1) + "…"
+        pad = max(width - 2 - len(wrapped[0]) - len(end), 2)
+        first = "  " + wrapped[0] + (" " * pad + (_c("2", age) if age else "")
+                                     + (("  " if age else "") + _c("33", flag) if flag else "") if end else "")
+        return "\n".join([first] + ["  " + more for more in wrapped[1:]])
+    title = _fit(title, max(avail, 10))
+    room, extra = avail - len(title) - 2, ""
+    for field in fields:
+        piece = (" · " if extra else "") + field
+        if len(extra) + len(piece) <= room:
+            extra += piece
+            continue
+        left = room - len(extra) - (3 if extra else 0)
+        if left >= 8:
+            extra += (" · " if extra else "") + _fit(field, left)
+        break
+    line = "  " + title + (f"  {_c('2', extra)}" if extra else "")
+    if end:
+        pad = max(width - 2 - len(title) - (len(extra) + 2 if extra else 0) - len(end), 2)
+        line += " " * pad + (_c("2", age) if age else "") + (("  " if age else "") + _c("33", flag) if flag else "")
+    return line
+
+
+def render(path: Path, title: str, now: datetime | None = None, width: int = 100,
+           height: int | None = None) -> str:
     now = now or datetime.now()
     if not path.exists():
         return (f"{_c('1', 'PLAN')}  {title}\n\nNo {path.name} yet in {path.parent}.\n"
@@ -144,14 +180,14 @@ def render(path: Path, title: str, now: datetime | None = None, width: int = 100
             age = _age(task["when"], now) if section in ("waiting", "progress", "review") else ""
             stale = (section in ("progress", "review") and task["when"] is not None
                      and (now - task["when"]).total_seconds() > STALE_HOURS * 3600)
-            # The title first; what is left of the width goes to the other fields.
-            text = _fit(first, max(width * 3 // 5, 30))
-            room = width - len(text) - len(age) - 18
-            tail = "  ".join(x for x in (_fit(" · ".join(rest), max(room, 0)) if room > 8 else "", age) if x)
-            line = f"  {text}" + (f"  {_c('2', tail)}" if tail else "")
-            lines.append(line + (_c("33", "  ⚠ no news") if stale else ""))
+            lines.append(task_line(first, rest, age, stale, width))
         if more > 0:
             lines.append(_c("2", f"  ... and {more} more" if section != "done" else f"  ({more} earlier)"))
+    lines = "\n".join(lines).splitlines()  # a wrapped task is several lines
+    if height and len(lines) > height:
+        # The sections come most important first, so cut from the bottom.
+        hidden = len(lines) - height + 1
+        lines = lines[: height - 1] + [_c("33", f"  ... {hidden} more lines below: make this split taller")]
     return "\n".join(lines)
 
 
@@ -163,7 +199,7 @@ def main() -> None:
     args = parser.parse_args()
     path = Path(args.file)
     if args.once:
-        print(render(path, args.title, width=shutil.get_terminal_size().columns))
+        print(render(path, args.title, width=shutil.get_terminal_size().columns))  # all of it
         return
     shown, last_draw = None, 0.0
     try:
@@ -171,8 +207,8 @@ def main() -> None:
             stamp = (path.stat().st_mtime if path.exists() else None, shutil.get_terminal_size())
             # Redraw when the file or the terminal changes, and each minute for the ages.
             if stamp != shown or time.monotonic() - last_draw > 60:
-                screen = render(path, args.title, width=stamp[1].columns)
-                sys.stdout.write("\033[H\033[2J" + screen + "\n")
+                screen = render(path, args.title, width=stamp[1].columns, height=stamp[1].lines)
+                sys.stdout.write("\033[H\033[2J" + screen)  # no newline at the end: it would scroll
                 sys.stdout.flush()
                 shown, last_draw = stamp, time.monotonic()
             time.sleep(POLL_SECONDS)
