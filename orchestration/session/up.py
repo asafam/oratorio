@@ -7,7 +7,7 @@ board messages into its pane whenever it is idle.
     oratorio up [-w NAME] [--team T] [--only a,b]     start a workspace
     oratorio add <agent> [-w NAME]                     add one while running
     oratorio remove <agent> [-w NAME]                  close one
-    oratorio restart <agent>|--all [-w NAME]           start it afresh, where it is
+    oratorio restart [agent] [-w NAME] [--force]       start it (or, with none, all) afresh
     oratorio tile [agent ...] [-w NAME]                arrange the tiles
     oratorio save [-w NAME]                            write its yaml file
     oratorio attach [-w NAME]                          open its tiles
@@ -410,6 +410,22 @@ def write_private(path: Path, text: str) -> None:
 CARRIED_SETTINGS = ("skipAutoPermissionPrompt", "autoMode")
 
 
+def rtk_for_claude(home: Path | None = None) -> tuple[list, str]:
+    """RTK (shorter command output, fewer tokens), if the user has it: the
+    hook their own sessions run before each shell command, and the note
+    that tells the model about it. Agents skip the user's hooks (see the
+    launch command), so they would not get it otherwise. ([], "") without RTK."""
+    if not shutil.which("rtk"):
+        return [], ""
+    home = home or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    try:
+        note = (home / "RTK.md").read_text().strip()
+    except OSError:
+        note = ""
+    hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+    return [hook], (note + "\n\n" if note else "")
+
+
 def carried_settings(status_line: bool = False, settings_file: Path | None = None) -> dict:
     """The CARRIED_SETTINGS found in the user's Claude Code settings file,
     with their status line too if `status_line`."""
@@ -449,16 +465,18 @@ def agent_command(agent_id: str, meta: dict, brief: str, token: str, state: dict
     # is safe to type (see session/tmux.py).
     flag = shlex.quote(str(idle_flag))
     hook = lambda command: {"hooks": [{"type": "command", "command": command}]}  # noqa: E731
+    rtk_hooks, rtk_note = rtk_for_claude()
     settings = RUN_DIR / f"{agent_id}.settings.json"
     write_private(settings, json.dumps({**carried_settings(bool(meta.get("status_line"))), "hooks": {
         "SessionStart": [hook(f"touch {flag}"),
                          {"matcher": "clear", **hook(f"touch {flag}.cleared")}],
         "UserPromptSubmit": [hook(f"rm -f {flag}")],
         "Stop": [hook(f"touch {flag}")],
+        **({"PreToolUse": rtk_hooks} if rtk_hooks else {}),
     }}, indent=2))
 
     prompt = RUN_DIR / f"{agent_id}.prompt.md"
-    prompt.write_text(instructions)
+    prompt.write_text(instructions + ("\n" + rtk_note if rtk_note else ""))
 
     command = [
         "claude", "-n", agent_id,
@@ -923,12 +941,17 @@ def cmd_restart(args) -> None:
                                                      if args.agent == "board" else ""))
         return
     running = running_agents()
-    if bool(args.agent) == args.all:
+    if args.agent and args.all:
         sys.exit("Say which agent to restart, or --all (not both).")
-    names = list(running) if args.all else [args.agent]
+    whole = not args.agent  # no agent named: the whole workspace
+    names = list(running) if whole else [args.agent]
     if not running or names[0] not in running:
         sys.exit(f"'{names[0] if names else args.agent}' is not running in '{WORKSPACE}'. "
                  f"Running: {', '.join(running) or 'nothing'}")
+    busy = [name for name in names if not is_idle(running[name])]
+    if busy and not args.force:
+        sys.exit(f"Busy right now: {', '.join(busy)}. A restart would cut off their work. "
+                 "Wait until they are idle, or add --force to restart anyway.")
     roles = role_files()
     state = load_state()
     if args.runner and not args.model:  # a model of the old runner means nothing to the new one
@@ -945,7 +968,25 @@ def cmd_restart(args) -> None:
             start_agent(conn, name, roles[role], state, replace=running[name])
             print(f"Restarted {agent_label(name)}.")
     db.close_pool()
-    print("Each starts with an empty conversation. Messages it had not finished are handed to it again.")
+    if whole:
+        for view in VIEWS:
+            start_view(view)
+        print(f"Restarted the views: {', '.join(VIEWS)}.")
+    print("Each agent starts with an empty conversation. Messages it had not finished are handed to it again.")
+
+
+def is_idle(record: dict[str, str]) -> bool:
+    """Is this agent waiting for input (not in the middle of a turn)? Read
+    from its idle flag and its screen, as its listener does."""
+    from orchestration.session.tmux import has_typed_text, idle_screen
+    runner = record.get("ORCH_RUNNER", "claude")
+    shown = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", record["ORCH_TMUX_PANE"]],
+                           capture_output=True, text=True)
+    if shown.returncode != 0:
+        return True  # nothing there to cut off
+    screen = shown.stdout
+    flag = Path(record.get("ORCH_IDLE_FLAG", "")).exists()
+    return (flag or runner != "claude") and idle_screen(screen, runner) is not None and not has_typed_text(screen, runner)
 
 
 def cmd_remove(args) -> None:
@@ -1301,8 +1342,10 @@ def main() -> None:
                        description="Stop an agent and start it again in the same tile or terminal, with an "
                                    "empty conversation and the current role file, model and settings. "
                                    "Messages it had not finished are handed to it again.")
-    p.add_argument("agent", nargs="?", help="an agent name, or `board` / `plan` for those views")
-    p.add_argument("--all", action="store_true", help="restart every agent in the workspace")
+    p.add_argument("agent", nargs="?", help="an agent name, or `board` / `plan` for those views; "
+                                             "none: the whole workspace, agents and views")
+    p.add_argument("--all", action="store_true", help="restart every agent (the same as naming none)")
+    p.add_argument("--force", action="store_true", help="restart even agents that are busy right now")
     p.add_argument("--model", help="also change its model")
     p.add_argument("--runner", choices=RUNNERS, help="also change what it runs in: claude or codex")
     p.set_defaults(run=cmd_restart)

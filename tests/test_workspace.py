@@ -172,3 +172,14 @@ def test_an_unknown_team_is_refused():
     from orchestration.session.up import team_agents
     with pytest.raises(ValueError):
         team_agents("nobody")
+
+
+def test_rtk_is_passed_on_to_claude_agents_only_when_installed(tmp_path, monkeypatch):
+    from orchestration.session import up
+    (tmp_path / "RTK.md").write_text("# Command output\nshort note")
+    monkeypatch.setattr(up.shutil, "which", lambda name: "/bin/rtk")
+    hooks, note = up.rtk_for_claude(tmp_path)
+    assert hooks[0]["matcher"] == "Bash" and hooks[0]["hooks"][0]["command"] == "rtk hook claude"
+    assert "short note" in note
+    monkeypatch.setattr(up.shutil, "which", lambda name: None)
+    assert up.rtk_for_claude(tmp_path) == ([], "")
