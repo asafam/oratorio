@@ -45,11 +45,36 @@ project; nothing else in this repo is specific to those teams.
 
 ## Quick start
 
+You need: `tmux`, Python 3.10+, Docker, and Claude Code (`claude`).
+Codex (`codex`) too, if you keep the Codex agents.
+
+**Once: install.** The board is a Postgres database; this runs it in
+Docker on your machine (to run it on a server instead, see
+[Board on a remote server](#board-on-a-remote-server-through-an-ssh-tunnel)).
+
 ```bash
-orchestration/ops/scripts/board_tunnel.sh up     # only if the board is remote
+git clone https://github.com/asafam/oratorio.git && cd oratorio
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# The board: start Postgres, then create its tables.
+export ORCH_BOARD_PG_PASSWORD=$(openssl rand -hex 16)
+docker compose -f orchestration/docker/docker-compose.yml up -d
+until docker exec orchestration-board-postgres pg_isready -q -h localhost; do sleep 1; done
+for f in orchestration/schema/0*.sql; do
+  docker exec -i orchestration-board-postgres psql -q -U orchestration orchestration_board < "$f"
+done
+echo "ORCH_BOARD_DSN=postgresql://orchestration:$ORCH_BOARD_PG_PASSWORD@localhost:5433/orchestration_board" > .env
+
+# The command: `oratorio` from any folder (~/.local/bin must be on your PATH).
+mkdir -p ~/.local/bin && ln -s "$PWD/bin/oratorio" ~/.local/bin/oratorio
+```
+
+**Each project: start a team.**
+
+```bash
 cd ~/my-research
-oratorio up                                      # bin/oratorio in this repo
-oratorio attach
+oratorio up              # the research team; for software: oratorio up --team dev
+oratorio attach          # or, in iTerm2: oratorio open --all
 ```
 
 You get one tile per agent plus a `BOARD` tile (what they say to each
