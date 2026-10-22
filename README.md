@@ -43,46 +43,92 @@ saying to each other. In both, Claude does the work and Codex checks it.
 Adapt the role and team files under `orchestration/` to your own
 project; nothing else in this repo is specific to those teams.
 
+## Prerequisites
+
+- macOS or Linux, with `tmux` and Python 3.10+.
+- [Claude Code](https://claude.com/claude-code) (`claude`), logged in.
+- [Codex CLI](https://github.com/openai/codex) (`codex`), logged in --
+  only if you keep the Codex agents (see
+  [Mixing Claude and Codex agents](#mixing-claude-and-codex-agents)).
+- A Postgres database for the board: Docker on your machine, or a small
+  server of your own. [Install](#install) sets up either.
+- Optional: iTerm2, to see each agent in a native split
+  (`oratorio open --all`).
+
 ## Quick start
 
-You need: `tmux`, Python 3.10+, Docker, and Claude Code (`claude`).
-Codex (`codex`) too, if you keep the Codex agents.
+After you [install](#install) it once:
 
-**Once: install.** The board is a Postgres database; this runs it in
-Docker on your machine (to run it on a server instead, see
-[Board on a remote server](#board-on-a-remote-server-through-an-ssh-tunnel)).
+```bash
+cd ~/my-research
+oratorio up          # starts the research team (for software: --team dev)
+oratorio attach      # shows the agents (in iTerm2: oratorio open --all)
+```
+
+Type your goal to `manager` (`lead` in the dev team). It hands the work
+to the others.
+
+## Install
+
+### 1. Get the code
 
 ```bash
 git clone https://github.com/asafam/oratorio.git && cd oratorio
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
 
-# The board: start Postgres, then create its tables.
+### 2. Start the board
+
+The board is the Postgres database the agents send messages through.
+Run it on your machine (below), or on a server
+([Board on a remote server](#board-on-a-remote-server-through-an-ssh-tunnel)).
+
+On your machine, with Docker. Run this in the repo folder:
+
+```bash
 export ORCH_BOARD_PG_PASSWORD=$(openssl rand -hex 16)
 docker compose -f orchestration/docker/docker-compose.yml up -d
 until docker exec orchestration-board-postgres pg_isready -q -h localhost; do sleep 1; done
-for f in orchestration/schema/0*.sql; do
+for f in orchestration/schema/0*.sql; do       # create the board's tables
   docker exec -i orchestration-board-postgres psql -q -U orchestration orchestration_board < "$f"
 done
 echo "ORCH_BOARD_DSN=postgresql://orchestration:$ORCH_BOARD_PG_PASSWORD@localhost:5433/orchestration_board" > .env
-
-# The command: `oratorio` from any folder (~/.local/bin must be on your PATH).
-mkdir -p ~/.local/bin && ln -s "$PWD/bin/oratorio" ~/.local/bin/oratorio
 ```
 
-**Each project: start a team.**
+`oratorio` reads the board's address from that `.env` file (it is
+gitignored). More on the container: `orchestration/docker/README.md`.
+
+### 3. Install the `oratorio` command
+
+`bin/oratorio` is a small script that runs the launcher with this repo's
+own `.venv`, so it works from any folder. To call it as plain `oratorio`,
+link it into a folder that is on your `PATH` -- run this from the repo
+root:
 
 ```bash
-cd ~/my-research
-oratorio up              # the research team; for software: oratorio up --team dev
-oratorio attach          # or, in iTerm2: oratorio open --all
+mkdir -p ~/.local/bin
+ln -s "$PWD/bin/oratorio" ~/.local/bin/oratorio
 ```
 
-You get one tile per agent plus a `BOARD` tile (what they say to each
+If `oratorio` is then "command not found", `~/.local/bin` is not on your
+`PATH` yet. Add this line to `~/.zshrc` (or `~/.bashrc`) and open a new
+terminal:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+It is a link, not a copy: pulling new code updates the command, and
+moving the repo breaks it (make the link again). To remove it:
+`rm ~/.local/bin/oratorio`.
+
+## Using oratorio
+
+`oratorio up` loads the role files into the board, gives each agent a
+fresh token, and starts the agents, their listeners and the views. You
+get one tile per agent plus a `BOARD` tile (what they say to each
 other) and a `PLAN` tile (what is done, in progress and pending), laid
-out in a grid for you. Click a tile to type in it. Give your goal to `manager`; it hands
-work to the others through the board. For a software project, start
-the development team instead: `oratorio up --team dev`, and give your
-goal to `lead`.
+out in a grid for you. Click a tile to type in it.
 
 | Command | What it does |
 |---|---|
@@ -242,6 +288,59 @@ Each file in `orchestration/roles/` is one role: a few settings on top
 brief below. `multiple: true` lets a role run as several numbered
 agents; `{agent_id}` in the brief is replaced with each agent's own id.
 
+### Watching the plan
+
+The `PLAN` tile shows the team's `TODO.md` -- the one place to see what
+has been done, what is being done, and what is still to do:
+
+```
+PLAN  perpetua   TODO.md changed 2m ago
+Waiting for you 1  ·  In progress 2  ·  Pending 1  ·  Done 1  ·  Dropped 1
+
+WAITING FOR YOU
+  T14 Use bAbI or CLUTRR for the long-chain test?  manager  3h
+IN PROGRESS
+  T12 Baseline on bAbI  experiment-1 · Q1  4h  ⚠ no news
+  T15 Ablation without the noise filter  experiment-2 · Q2  20m
+```
+
+`manager` (or `lead`) keeps the file in a fixed format, one short line
+per task, newest first, sorted under `## Waiting for you`, `## In progress`, `## In
+review`, `## Pending`, `## Done` and `## Dropped` (see its role file).
+Work that has sat in progress or in review for more than 3 hours is
+flagged. The tile redraws when the file changes; it only reads the
+file, so it costs no tokens. `oratorio plan` prints it once.
+
+### Watching the agents
+
+Run the board view in its own terminal and leave it open:
+
+```bash
+ORCH_BOARD_DSN=... python -m orchestration.watch.board
+```
+
+It shows who is online, each message as it is posted, and when each
+recipient is handed it and finishes it:
+
+```
+● evaluator  online (claude)
+○ monitor  offline, last seen 12:49:09
+------------------------------------------------------------
+12:49:09  41  evaluator -> #eval-results  [thread run-12]
+          Run 12 done: accuracy 0.83, 2 failures
+          to: dataset, monitor
+12:49:09  41  handed to dataset
+12:49:10  41  dataset finished it
+```
+
+With `-w NAME` it shows one workspace; without, every workspace on the
+board, with agents shown as `workspace/name`.
+
+It only reads -- watching never marks a message as seen. It checks the
+database once a second, which is plain code and costs no tokens.
+`--once` prints the current state and exits; `--history N` sets how many
+recent messages to show first.
+
 ## How it works
 
 ```
@@ -345,59 +444,6 @@ being needed often, or from losing work:
 | `orchestration/roles/` | One Markdown+frontmatter file per role, plus the sync script. |
 | `orchestration/ops/systemd/` | Optional service files (listener, tunnel for `server_http.py`). |
 
-## Watching the plan
-
-The `PLAN` tile shows the team's `TODO.md` -- the one place to see what
-has been done, what is being done, and what is still to do:
-
-```
-PLAN  perpetua   TODO.md changed 2m ago
-Waiting for you 1  ·  In progress 2  ·  Pending 1  ·  Done 1  ·  Dropped 1
-
-WAITING FOR YOU
-  T14 Use bAbI or CLUTRR for the long-chain test?  manager  3h
-IN PROGRESS
-  T12 Baseline on bAbI  experiment-1 · Q1  4h  ⚠ no news
-  T15 Ablation without the noise filter  experiment-2 · Q2  20m
-```
-
-`manager` (or `lead`) keeps the file in a fixed format, one short line
-per task, newest first, sorted under `## Waiting for you`, `## In progress`, `## In
-review`, `## Pending`, `## Done` and `## Dropped` (see its role file).
-Work that has sat in progress or in review for more than 3 hours is
-flagged. The tile redraws when the file changes; it only reads the
-file, so it costs no tokens. `oratorio plan` prints it once.
-
-## Watching the agents
-
-Run the board view in its own terminal and leave it open:
-
-```bash
-ORCH_BOARD_DSN=... python -m orchestration.watch.board
-```
-
-It shows who is online, each message as it is posted, and when each
-recipient is handed it and finishes it:
-
-```
-● evaluator  online (claude)
-○ monitor  offline, last seen 12:49:09
-------------------------------------------------------------
-12:49:09  41  evaluator -> #eval-results  [thread run-12]
-          Run 12 done: accuracy 0.83, 2 failures
-          to: dataset, monitor
-12:49:09  41  handed to dataset
-12:49:10  41  dataset finished it
-```
-
-With `-w NAME` it shows one workspace; without, every workspace on the
-board, with agents shown as `workspace/name`.
-
-It only reads -- watching never marks a message as seen. It checks the
-database once a second, which is plain code and costs no tokens.
-`--once` prints the current state and exits; `--history N` sets how many
-recent messages to show first.
-
 ## Where things run
 
 The simple setup is **everything on one machine**: Postgres, and one
@@ -413,6 +459,15 @@ If agents run on other machines, each one needs two things:
 Keep the board on a small, always-on host you control, not on a shared
 machine that gets rebooted without warning -- everything else depends on
 it being up.
+
+To run one agent by hand (on another machine, or with another tool):
+`python -m orchestration.roles.sync_roles [--workspace NAME]` prints its
+token once; start
+the session with the board's MCP server configured
+(`orchestration/mcp/mcp_config.example.json`), and run
+`python -m orchestration.listener.listen` with `ORCH_BOARD_DSN`,
+`ORCH_AGENT_TOKEN`, and -- to have messages typed in -- `ORCH_TMUX_PANE`
+and `ORCH_IDLE_FLAG`.
 
 ### Board on a remote server, through an SSH tunnel
 
@@ -438,15 +493,22 @@ printf 'Port 22\nPort 443\n' > /etc/ssh/sshd_config.d/10-oratorio-ports.conf
 systemctl daemon-reload && systemctl restart ssh.socket
 ```
 
-On your machine:
+On your machine, in the repo folder:
 
 ```bash
+cat > .env <<EOF
+ORATORIO_BOARD_HOST=<server address>
+ORCH_BOARD_DSN=postgresql://orchestration:<password>@localhost:5433/orchestration_board
+EOF
 export ORATORIO_BOARD_HOST=<server address>
 orchestration/ops/scripts/board_tunnel.sh up      # also: down, status
-export ORCH_BOARD_DSN=postgresql://orchestration:<password>@localhost:5433/orchestration_board
+for f in orchestration/schema/0*.sql; do          # create the board's tables
+  psql "postgresql://orchestration:<password>@localhost:5433/orchestration_board" -f "$f"
+done
 ```
 
-Keep those values in a `.env` file (gitignored), never in git.
+The `.env` file is gitignored; never put these values in git. While a
+team runs, `oratorio up` keeps the tunnel open for you.
 
 **Moving the board** somewhere else is a dump and a restore, then
 pointing `ORATORIO_BOARD_HOST` at the new place:
@@ -455,61 +517,6 @@ pointing `ORATORIO_BOARD_HOST` at the new place:
 pg_dump "$ORCH_BOARD_DSN" > board.sql        # everything, one file
 psql "$NEW_ORCH_BOARD_DSN" -f board.sql      # into an empty database
 ```
-
-## Bring-up order
-
-1. **Postgres**: locally with `orchestration/docker/docker-compose.yml`
-   (see its README), or on a remote server (above). Then apply every
-   file in `orchestration/schema/` in order (`001_init.sql`,
-   `002_seed_topics.sql`, `003_persistent_agents.sql`,
-   `004_workspaces.sql`).
-2. **Point at it**: put `ORCH_BOARD_DSN=...` in a `.env` file in the repo
-   root (gitignored).
-3. **Start the team**: `bin/oratorio up` (see Quick start). It loads
-   the role files into the board, gives each agent a fresh token, and
-   starts the sessions, listeners and board view. To type plain
-   `oratorio` from any folder, see Setup below.
-
-To run one agent by hand instead (another machine, another tool):
-`python -m orchestration.roles.sync_roles [--workspace NAME]` prints its
-token once; start
-the session with the board's MCP server configured
-(`orchestration/mcp/mcp_config.example.json`), and run
-`python -m orchestration.listener.listen` with `ORCH_BOARD_DSN`,
-`ORCH_AGENT_TOKEN`, and -- to have messages typed in -- `ORCH_TMUX_PANE`
-and `ORCH_IDLE_FLAG`.
-
-## Setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### The `oratorio` command
-
-`bin/oratorio` is a small script that runs the launcher with this repo's
-own `.venv`, so it works from any folder. To call it as plain `oratorio`,
-link it into a folder that is on your `PATH` -- run this from the repo
-root:
-
-```bash
-mkdir -p ~/.local/bin
-ln -s "$PWD/bin/oratorio" ~/.local/bin/oratorio
-```
-
-If `oratorio` is then "command not found", `~/.local/bin` is not on your
-`PATH` yet. Add this line to `~/.zshrc` (or `~/.bashrc`) and open a new
-terminal:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-It is a link, not a copy: pulling new code updates the command, and
-moving the repo breaks it (make the link again). To remove it:
-`rm ~/.local/bin/oratorio`.
 
 ## Running the tests
 
@@ -544,16 +551,16 @@ pytest tests/ -v
   agents running in one folder -- a request in one never showed up in
   the other.
 
+- Live, with Codex: Codex agents (`reviewer`, `advisor`, `critic`)
+  working beside Claude agents in one workspace -- getting board
+  messages typed in, answering through the board, and switching a
+  running agent between Claude and Codex with `restart --runner`.
+- Live, with full teams: research teams of six to seven agents, and the
+  dev team, several workspaces at once on one remote board.
+
 **Not tried yet**
-- Message traffic with more than two agents at once in one workspace.
 - Each agent of a workspace working in its own folder -- all agents of a
   workspace share its `workdir`.
-
-**Not built yet**
-- **Codex.** The typing mechanism does not care which tool is in the
-  pane, but the idle flag is set by Claude Code hooks, and `up.py` only
-  knows how to start Claude Code.
-- **Protecting a half-typed human draft** in an idle tile (see above).
 
 **Still unverified from before**
 - The `mcp` SDK's `TokenVerifier`/`AuthSettings` wiring in
