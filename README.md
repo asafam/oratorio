@@ -46,10 +46,11 @@ project; nothing else in this repo is specific to those teams.
 ## Prerequisites
 
 - macOS or Linux, with `tmux` and Python 3.10+.
-- [Claude Code](https://claude.com/claude-code) (`claude`), logged in.
-- [Codex CLI](https://github.com/openai/codex) (`codex`), logged in --
-  only if you keep the Codex agents (see
-  [Mixing Claude and Codex agents](#mixing-claude-and-codex-agents)).
+- At least one of these, logged in:
+  [Claude Code](https://claude.com/claude-code) (`claude`) or
+  [Codex CLI](https://github.com/openai/codex) (`codex`). With both,
+  Claude does the work and Codex checks it. With one, every agent runs
+  in it (see [Mixing Claude and Codex agents](#mixing-claude-and-codex-agents)).
 - A Postgres database for the board: Docker on your machine, or a small
   server of your own. [Install](#install) sets up either.
 - Optional: iTerm2, to see each agent in a native split
@@ -206,6 +207,9 @@ wins:
 - `runner: codex` in a role file, for every agent of that role,
 - `oratorio add reviewer --runner codex`, or
   `oratorio restart reviewer --runner codex` to switch a running one.
+
+If an agent's program is not installed, it runs in the other one, and
+`oratorio` says so. So one of the two is enough.
 
 On the board nothing changes: a Codex agent sends and gets messages like
 any other, and its tile reads `reviewer (codex)`.

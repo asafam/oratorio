@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from orchestration.session.up import _team_order, carried_settings, model_for, model_label, parse_agents, runner_for, iterm_script, resolve_agent, role_files, tile_order
+from orchestration.session.up import _team_order, carried_settings, model_for, model_label, parse_agents, runner_for, installed_runner, iterm_script, resolve_agent, role_files, tile_order
 
 ROLES = role_files()
 
@@ -183,3 +183,11 @@ def test_rtk_is_passed_on_to_claude_agents_only_when_installed(tmp_path, monkeyp
     assert "short note" in note
     monkeypatch.setattr(up.shutil, "which", lambda name: None)
     assert up.rtk_for_claude(tmp_path) == ([], "")
+
+
+def test_installed_runner_falls_back_to_the_one_that_is_installed():
+    only = lambda name: (lambda cmd: f"/bin/{cmd}" if cmd == name else None)
+    assert installed_runner("codex", only("codex")) == "codex"
+    assert installed_runner("codex", only("claude")) == "claude"
+    assert installed_runner("claude", only("codex")) == "codex"
+    assert installed_runner("codex", lambda cmd: None) == "codex"  # neither: check_runner says so

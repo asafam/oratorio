@@ -360,9 +360,25 @@ def model_for(agent_id: str, role_model: str | None, state: dict,
     return own or team or role or ("sonnet" if runner == "claude" else None)
 
 
+def installed_runner(runner: str, which=shutil.which) -> str:
+    """The runner to use when `runner` is asked for: itself if its
+    command is installed, else the other one if that is. Only one of
+    Claude Code and Codex is needed; the teams ask for both."""
+    if which(runner) or runner not in RUNNERS:
+        return runner
+    return next((other for other in RUNNERS if other != runner and which(other)), runner)
+
+
+_warned_fallback: set[str] = set()
+
+
 def setup_for(agent_id: str, meta: dict, state: dict) -> tuple[str, str | None]:
     """(runner, model) for one agent, from its role file's frontmatter and the state."""
-    runner = runner_for(agent_id, meta.get("runner"), state)
+    asked = runner_for(agent_id, meta.get("runner"), state)
+    runner = installed_runner(asked)
+    if runner != asked and agent_id not in _warned_fallback:
+        _warned_fallback.add(agent_id)
+        print(f"{agent_id}: `{asked}` is not installed, so it runs in `{runner}`.")
     return runner, model_for(agent_id, meta.get("model"), state, runner, meta.get("runner"))
 
 
@@ -391,8 +407,9 @@ def check_runner(runner: str, permission_mode: str) -> None:
         if permission_mode not in CODEX_PERMISSIONS:
             sys.exit(f"permission_mode '{permission_mode}' has no Codex equivalent here. "
                      f"For Codex agents use one of: {', '.join(CODEX_PERMISSIONS)}")
-        if not shutil.which("codex"):
-            sys.exit("A Codex agent needs the `codex` command, and it is not on your PATH.")
+    if not shutil.which(runner):
+        sys.exit("Agents need Claude Code (`claude`) or Codex (`codex`), "
+                 "and neither is on your PATH.")
 
 
 def write_private(path: Path, text: str) -> None:
