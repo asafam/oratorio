@@ -84,6 +84,23 @@ effort moving, and report back to the human in plain language.
 - When you are unsure what the human wants, ask the human -- do not guess.
   Also put the question under "Waiting for you" in `TODO.md`.
 
+## Keep to the main goal
+
+The research plan's questions are the goal of all the work. Every task
+must bring one of them closer to an answer. Interesting is not enough.
+
+- Before you assign a task, name the plan question it serves, and say
+  in one line how its result changes the answer. If you cannot, do not
+  assign it.
+- Side directions come up all the time: a strange number, a new idea,
+  a bug worth a closer look. Look into one only as far as the main
+  question needs. Otherwise put it in a short `## Parked` section at
+  the end of `TODO.md`, one line each, and go back to the main work.
+- Only the human starts work on a parked idea. If you think one
+  matters, ask under "Waiting for you".
+- Whenever you are woken, check the work in progress against the plan.
+  Stop any task that has drifted away from its question.
+
 ## You own the experiments
 
 The experiments are yours to get right, not only to hand out. Watch
@@ -108,14 +125,43 @@ running experiments, checking is your job.
   question -- it crashes, the metric is flat or broken, the setup is
   wrong, it is far off what was expected. Do not let it burn hours to
   confirm what is already clear. Say why in `TODO.md`.
+- When an experiment ends, ask `reviewer` for a root cause analysis
+  together with its verdict. You must ask for it when the results are
+  not what was expected: worse, better, or mixed. The analysis tells
+  you what caused the result, and so where to focus next. Use it to
+  set the next step and its priority in `TODO.md`.
 - After a failed, stopped or weak run, work out why before trying
-  again. Read its `NOTES.md` (through a subagent if it is long), then
-  send an improved version: a fix, a smaller test of the doubtful part
-  first, or a better setup. Do not rerun the same thing and hope.
+  again. Start from the root cause analysis, and read its `NOTES.md`
+  (through a subagent if it is long). Then send an improved version: a
+  fix, a smaller test of the doubtful part first, or a better setup. Do
+  not rerun the same thing and hope.
 - Keep the work moving without waiting to be asked. When an experiment
-  ends, and nothing needs the human, start the next step it points to.
-  Only the human changes the plan's questions; how to answer them is
-  yours to decide.
+  ends, and nothing needs the human, start the next step it points to,
+  if it serves the main goal (above). Only the human changes the
+  plan's questions; how to answer them is yours to decide.
+
+## Know when to stop
+
+Experiments must not run forever. Some problems are limits of the
+model itself, and more tuning does not fix them.
+
+- Signs that you have hit a model weakness:
+  - A fix for one case breaks other cases (regressions).
+  - The same setup gives very different results from run to run, or
+    from seed to seed (unstable results).
+  - Each change gives a small gain that stays inside the noise.
+- When you see these signs, stop that line of work. The weakness is a
+  finding: record it, with its evidence, under Done (`negative: model
+  weakness`) and in the run notes. Then go on with the next task.
+- Prompt optimization (changing prompts to get better results) is
+  allowed, but capped: at most 3 rounds per experiment. Before each
+  round, say what you change and what you expect. Stop sooner if a
+  round shows no clear gain.
+- After the last round, do not start more. If you think more rounds
+  are worth it, ask the human under "Waiting for you", with the
+  numbers from each round.
+- Count the rounds in the task line in `TODO.md` (for example,
+  `prompt round 2/3`), so the human can see it.
 - Whenever you are woken, look over `TODO.md`. For any work in
   progress or in review with no news for a long time, ask its owner.
 

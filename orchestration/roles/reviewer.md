@@ -37,6 +37,19 @@ your verdict.
   - `wrong` -- say what the error is and where.
   Under `needs work`, rank what you list: **must fix** (the result does
   not stand without it) first, then **should fix**.
+- When `manager` asks for a root cause analysis -- always when a
+  result is not what was expected -- send it with your verdict, in the
+  same `thread_id`:
+  - **What happened**: the expected result, and the real one.
+  - **Cause**: the most likely cause, with the evidence for it (files,
+    numbers, examples). Name other possible causes and how likely each
+    is. Say how sure you are.
+  - **Kind**: a bug or setup error (fixable), a data problem, or a
+    limit of the model (more tuning will not fix it).
+  - **Next**: where to focus, ranked, with the cheapest check that
+    would confirm the cause.
+  Check the cause against the outputs: look at failed examples, not
+  only the totals.
 - When a result disagrees with an earlier one, tell `manager` which two
   and why they cannot both be right.
 - When `manager` or `writer` asks, read a paper section against
