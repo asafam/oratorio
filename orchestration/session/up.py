@@ -733,8 +733,12 @@ def start_agent(conn, agent_id: str, path: Path, state: dict, replace: dict | No
         listener_pane = tmux("new-window", "-d", "-t", SESSION, "-n", "listeners", "-c", str(REPO),
                              "-P", "-F", "#{pane_id}", listener)
     else:
+        # Nobody looks at this window, but a small terminal attached to the
+        # session shrinks it until there is no room for one more pane.
+        tmux("resize-window", "-t", f"{SESSION}:listeners", "-x", "250", "-y", "60")
         listener_pane = tmux("split-window", "-d", "-t", f"{SESSION}:listeners", "-c", str(REPO),
                              "-P", "-F", "#{pane_id}", listener)
+        tmux("select-layout", "-t", f"{SESSION}:listeners", "tiled")
     tmux("select-pane", "-t", listener_pane, "-T", f"listener: {agent_id}")
     with env_file.open("a") as f:
         f.write(f"ORCH_LISTENER_PANE={shlex.quote(listener_pane)}\n")
@@ -763,6 +767,7 @@ def keep_tunnel() -> None:
         return
     script = shlex.quote(str(REPO / "orchestration" / "ops" / "scripts" / "board_tunnel.sh"))
     host = shlex.quote(os.environ["ORATORIO_BOARD_HOST"])
+    tmux("resize-window", "-t", f"{SESSION}:listeners", "-x", "250", "-y", "60")  # room for it
     pane = tmux("split-window", "-d", "-t", f"{SESSION}:listeners", "-c", str(REPO), "-P", "-F",
                 "#{pane_id}", f"ORATORIO_BOARD_HOST={host} {script} keep")
     tmux("select-pane", "-t", pane, "-T", "tunnel")
