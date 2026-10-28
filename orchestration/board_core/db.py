@@ -26,7 +26,11 @@ def get_pool() -> ConnectionPool:
         # check: test a connection before handing it out. After the laptop
         # sleeps or the tunnel drops, the pooled ones are dead; without
         # this, the next query on each fails instead of reconnecting.
-        _pool = ConnectionPool(dsn, min_size=1, max_size=10, open=True,
+        # Every agent runs a listener and an MCP server, each with its own
+        # pool, and the database allows only so many connections in all.
+        # So keep none open while idle (max_idle: closed after a minute
+        # unused), and only a few at once.
+        _pool = ConnectionPool(dsn, min_size=0, max_size=3, max_idle=60, open=True,
                                check=ConnectionPool.check_connection)
     return _pool
 
